@@ -1,0 +1,6 @@
+transformers==4.46.2
+accelerate
+safetensors
+evalplus
+tqdm
+numpy
