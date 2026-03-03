@@ -1,7 +1,7 @@
 {
   "model": "deepseek",
   "dataset": "mbpp",
-  "source_eval_file": "/model/tteng/Coder/outputs/deepseek_mbpp-sanitized_eval_results.json",
+  "source_eval_file": "/home/kodai/CoCopilot/outputs/deepseek_mbpp-sanitized_eval_results.json",
   "date": "2026-02-21 18:24",
   "hash": "ee43ecabebf20deef4bb776a405ac5b1",
   "pass_at_k": {},

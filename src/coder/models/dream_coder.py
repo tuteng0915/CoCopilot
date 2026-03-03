@@ -73,6 +73,130 @@ class DreamCoder(CoderModel):
         return s.strip()
 
     @torch.inference_mode()
+    def score_tokens(
+        self,
+        prompt_ids: torch.Tensor,
+        comp_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Single forward pass → per-token confidence for the completion tokens.
+
+        Returns confidence[i] = P(comp_ids[0, i] | context), shape [M].
+        Uses the same left-shifted logit convention as _sample in generation_utils.py.
+        """
+        if comp_ids.shape[1] == 0:
+            return torch.zeros(0, device=self.device)
+
+        full_ids = torch.cat([prompt_ids, comp_ids], dim=1)           # [1, L_p+M]
+        logits = self.model(full_ids).logits                           # [1, L_p+M, V]
+        # Same left-shift used in _sample (generation_utils.py line 413)
+        logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
+        comp_logits = logits[0, prompt_ids.shape[1]:, :].float()       # [M, V]
+        probs = torch.softmax(comp_logits, dim=-1)                     # [M, V]
+        confidence = probs[torch.arange(comp_ids.shape[1]), comp_ids[0]]  # [M]
+        return confidence
+
+    @torch.inference_mode()
+    def generate_with_remask(
+        self,
+        req: ModelRequest,
+        draft: str,
+        confidence_threshold: float = 0.5,
+        mask_ratio: float | None = None,
+    ) -> str:
+        """
+        Score the DeepSeek draft, remask low-confidence tokens, and regenerate
+        only those positions via DreamCoder diffusion.
+
+        Args:
+            req: ModelRequest carrying the original prompt and generation params.
+            draft: Raw completion string from DeepSeek-Coder.
+            confidence_threshold: Mask tokens where P(token) < threshold.
+            mask_ratio: Alternative — mask the bottom K% least-confident tokens.
+                        If set, takes precedence over confidence_threshold.
+        """
+        mask_token_id = self.model.config.mask_token_id
+
+        # Build prompt via chat template (matches generate())
+        messages = [{"role": "user", "content": req.prompt}]
+        enc = self.tok.apply_chat_template(
+            messages,
+            return_tensors="pt",
+            return_dict=True,
+            add_generation_prompt=True,
+        )
+        prompt_ids = enc.input_ids.to(self.device)      # [1, L_p]
+        attn_mask = enc.attention_mask.to(self.device)
+
+        # Tokenize draft as plain text (no chat template, no special tokens)
+        comp_enc = self.tok(draft, return_tensors="pt", add_special_tokens=False)
+        comp_ids = comp_enc.input_ids.to(self.device)   # [1, M]
+        M = comp_ids.shape[1]
+        if M == 0:
+            return draft
+
+        # Score each completion token
+        confidence = self.score_tokens(prompt_ids, comp_ids)  # [M]
+
+        # Determine which positions to remask
+        if mask_ratio is not None:
+            k = max(1, int(M * mask_ratio))
+            threshold_val = torch.kthvalue(confidence, k).values.item()
+            mask_pos = confidence <= threshold_val
+        else:
+            mask_pos = confidence < confidence_threshold
+
+        if not mask_pos.any():
+            return draft  # all tokens are confident enough — nothing to do
+
+        # Build partial init: high-confidence tokens stay, low-confidence → MASK
+        init_comp = comp_ids.clone()
+        init_comp[0, mask_pos] = mask_token_id
+
+        # Hook: at step=None (init), overwrite the generation slot with init_comp.
+        # _sample pads input_ids with MASK tokens to max_length, then calls the hook.
+        # Positions where x == mask_token_id are the only ones updated by diffusion,
+        # so pre-filled (non-MASK) positions are preserved throughout generation.
+        L_p = prompt_ids.shape[1]
+
+        def init_hook(step, x, logits):
+            if step is None:
+                x[0, L_p : L_p + M] = init_comp[0]
+            return x
+
+        if req.seed is not None:
+            torch.manual_seed(req.seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(req.seed)
+
+        dream_temp = req.temperature if (req.temperature and req.temperature > 0) else 0.1
+        dream_top_p = req.top_p if (req.top_p and 0.0 < req.top_p <= 1.0) else 0.95
+        # Fewer steps than full generation since most tokens are pre-filled
+        steps = max(M, 128)
+
+        out = self.model.diffusion_generate(
+            prompt_ids,
+            attention_mask=attn_mask,
+            max_new_tokens=M,           # must equal draft length exactly
+            output_history=False,
+            return_dict_in_generate=True,
+            steps=steps,
+            temperature=dream_temp,
+            top_p=dream_top_p,
+            alg="entropy",
+            alg_temp=0.0,
+            generation_tokens_hook_func=init_hook,
+        )
+
+        seq = out.sequences[0]
+        gen_ids = seq[L_p:]
+        raw = self.tok.decode(gen_ids.tolist(), skip_special_tokens=False)
+        eos = self.tok.eos_token
+        if eos:
+            raw = raw.split(eos)[0]
+        return self._clean_completion(raw, req.prompt)
+
+    @torch.inference_mode()
     def generate(self, req: ModelRequest) -> str:
         """
         Return completion text only (not the prompt).

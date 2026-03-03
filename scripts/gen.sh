@@ -1,4 +1,16 @@
-export PYTHONPATH=src
+export PYTHONPATH=/home/kodai/CoCopilot/src
+export CUDA_VISIBLE_DEVICES=5
+
+python scripts/gen_evalplus.py \
+  --model dream \
+  --dataset humaneval \
+  --out outputs/dream_humaneval.jsonl
+
+python scripts/postprocess_evalplus.py \
+  --dataset humaneval \
+  --samples outputs/dream_humaneval.jsonl
+
+exit
 
 python scripts/gen_evalplus.py \
   --model dream \
