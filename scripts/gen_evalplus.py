@@ -167,18 +167,20 @@ def main():
             solution = build_evalplus_solution(prob, gen)
 
 
-            rec = SampleRecord(
-                task_id=task_id,
-                solution=solution,
-                model=model.name,
-                gen={
+            rec = {
+                "task_id": task_id,
+                "prompt": req.prompt,
+                "raw_completion": gen,
+                "solution": solution,
+                "model": model.name,
+                "gen": {
                     "max_new_tokens": args.max_new_tokens,
                     "temperature": args.temperature,
                     "top_p": args.top_p,
                     "seed": args.seed,
                 },
-            )
-            f.write(json.dumps(rec.to_json(), ensure_ascii=False) + "\n")
+            }
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     print(f"[samples] wrote {args.out}")
 

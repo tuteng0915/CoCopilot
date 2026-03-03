@@ -1,7 +1,7 @@
 {
   "model": "deepseek",
   "dataset": "humaneval",
-  "source_eval_file": "/model/tteng/Coder/outputs/deepseek_humaneval-sanitized_eval_results.json",
+  "source_eval_file": "/home/kodai/CoCopilot/outputs/deepseek_humaneval-sanitized_eval_results.json",
   "date": "2026-02-21 18:21",
   "hash": "fe585eb4df8c88d844eeb463ea4d0302",
   "pass_at_k": {},

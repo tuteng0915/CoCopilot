@@ -1,0 +1,24 @@
+{
+  "model": "remask",
+  "dataset": "humaneval",
+  "source_eval_file": "/home/kodai/CoCopilot/outputs/remask_humaneval_t0.7-sanitized_eval_results.json",
+  "date": "2026-02-28 13:00",
+  "hash": "fe585eb4df8c88d844eeb463ea4d0302",
+  "pass_at_k": {},
+  "summary": {
+    "n_tasks": 164,
+    "n_samples_total": 164,
+    "n_base_pass": 127,
+    "n_plus_pass": 117,
+    "n_both_pass": 116,
+    "base_status_counts": {
+      "pass": 127,
+      "fail": 37
+    },
+    "plus_status_counts": {
+      "pass": 117,
+      "fail": 46,
+      "timeout": 1
+    }
+  }
+}
