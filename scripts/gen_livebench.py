@@ -9,7 +9,7 @@ from tqdm import tqdm
 from datasets import load_dataset
 
 from coder.utils.schema import ModelRequest
-from coder.models import DreamCoder, DeepSeekCoder
+from coder.models import DreamCoder, DeepSeekCoder, QwenCoder, LLaDACoder
 
 
 def build_model(name: str, device: str, model_id: Optional[str] = None):
@@ -22,6 +22,16 @@ def build_model(name: str, device: str, model_id: Optional[str] = None):
     if name in ["deepseek", "deepseek_coder", "ds"]:
         return DeepSeekCoder(
             model_id=model_id or "deepseek-ai/deepseek-coder-6.7b-instruct",
+            device=device,
+        )
+    if name in ["qwen", "qwen_coder"]:
+        return QwenCoder(
+            model_id=model_id or "Qwen/Qwen2.5-Coder-7B-Instruct",
+            device=device,
+        )
+    if name in ["llada", "llada_coder"]:
+        return LLaDACoder(
+            model_id=model_id or "GSAI-ML/LLaDA-8B-Instruct",
             device=device,
         )
     raise ValueError(f"Unknown --model: {name}")
@@ -122,10 +132,13 @@ def main():
             )
             completion = model.generate(req)
 
-            # 统一成你 evalplus 的 samples 风格：task_id / solution / model / gen
+            # 对 LiveBench 也写出 prompt/raw_completion，方便后续 remask/self-refine 等复用。
             row = {
                 "task_id": f"LiveBench/{qid}",
                 "question_id": qid,
+                "prompt": prompt,
+                "raw_completion": completion,
+                # LiveBench 官方评测只看 solution 字段，这里保持向后兼容。
                 "solution": completion,
                 "model": model.name,
                 "gen": {

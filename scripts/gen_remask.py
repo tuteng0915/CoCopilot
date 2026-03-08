@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-gen_remask.py — Refine DeepSeek-Coder drafts using DreamCoder token remasking.
+gen_remask.py — Refine DeepSeek-Coder (or other AR) drafts using DreamCoder token remasking.
 
 Pipeline:
-  1. Load DeepSeek-Coder JSONL outputs (prompt + raw_completion per task).
+  1. Load AR JSONL outputs (prompt + raw_completion per task).
+     - EvalPlus: from scripts/gen_evalplus.py
+       fields: task_id, prompt, raw_completion, solution, model, gen
+     - LiveBench-Coding: from scripts/gen_livebench.py
+       fields: task_id, question_id, prompt, raw_completion, solution, model, gen, meta
   2. For each task, score each completion token with DreamCoder's forward pass.
   3. Mask low-confidence tokens (by threshold or by ratio).
   4. Regenerate only the masked positions via DreamCoder diffusion.
-  5. Write refined JSONL (EvalPlus-compatible).
+  5. Write refined JSONL (EvalPlus/LiveBench-compatible).
 
-Input JSONL fields:  task_id, prompt, raw_completion, solution, model, gen
-Output JSONL fields: task_id, prompt, draft_completion, raw_completion, solution, model, gen
+Output JSONL (EvalPlus):
+  task_id, prompt, draft_completion, raw_completion, solution, model, gen
+
+Output JSONL (LiveBench):
+  task_id, question_id, prompt, draft_completion, raw_completion, solution, model, gen, meta
 """
 from __future__ import annotations
 
@@ -98,7 +105,11 @@ def main() -> None:
             if task_id in done_ids:
                 continue
 
-            prompt_text: str = rec["prompt"]
+            # EvalPlus 与 LiveBench-Coding 共用：都要求输入里写出 prompt/raw_completion。
+            # LiveBench 记录有 question_id/meta 字段，用于后续官方评测。
+            is_livebench = "question_id" in rec or str(task_id).startswith("LiveBench/")
+
+            prompt_text: str = rec.get("prompt", "")
             draft: str = rec.get("raw_completion", "")
 
             req = ModelRequest(
@@ -120,14 +131,19 @@ def main() -> None:
                 print(f"[warn] {task_id}: generate_with_remask failed ({e}); keeping draft.")
                 refined = draft
 
-            solution = build_evalplus_solution(prompt_text, refined)
+            # EvalPlus: 需要把 refined completion 封装成完整 solution 程序
+            # LiveBench: 官方评测直接使用 solution 字段，无需 prepend prompt。
+            if is_livebench:
+                solution = refined
+            else:
+                solution = build_evalplus_solution(prompt_text, refined)
 
             out_rec = {
                 "task_id":           task_id,
                 "prompt":            prompt_text,
-                "draft_completion":  draft,       # original DeepSeek output
+                "draft_completion":  draft,       # original AR output
                 "raw_completion":    refined,     # DreamCoder-refined output
-                "solution":          solution,    # EvalPlus-compatible full solution
+                "solution":          solution,
                 "model":             f"dream_remask::{args.model_id}",
                 "gen": {
                     "source_model":         rec.get("model", "unknown"),
@@ -138,6 +154,13 @@ def main() -> None:
                     "seed":                 args.seed,
                 },
             }
+
+            # LiveBench: 保留 question_id / meta，方便 eval_livebench.py 直接复用。
+            if is_livebench:
+                if "question_id" in rec:
+                    out_rec["question_id"] = rec["question_id"]
+                if "meta" in rec:
+                    out_rec["meta"] = rec["meta"]
             fout.write(json.dumps(out_rec, ensure_ascii=False) + "\n")
             fout.flush()
 

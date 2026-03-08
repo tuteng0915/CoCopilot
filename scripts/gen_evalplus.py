@@ -9,15 +9,37 @@ from tqdm import tqdm
 from evalplus.data import get_human_eval_plus, get_mbpp_plus
 
 from coder.utils.schema import ModelRequest, SampleRecord
-from coder.models import DreamCoder, DeepSeekCoder, CoderModel
+from coder.models import (
+    CoderModel,
+    DreamCoder,
+    DeepSeekCoder,
+    QwenCoder,
+    LLaDACoder,
+)
 import re
 
 
 def build_model(name: str, device: str, model_id: str | None) -> CoderModel:
     if name == "dream":
-        return DreamCoder(model_id=model_id or "Dream-org/Dream-Coder-v0-Instruct-7B", device=device)
+        return DreamCoder(
+            model_id=model_id or "Dream-org/Dream-Coder-v0-Instruct-7B",
+            device=device,
+        )
     if name == "deepseek":
-        return DeepSeekCoder(model_id=model_id or "deepseek-ai/deepseek-coder-6.7b-instruct", device=device)
+        return DeepSeekCoder(
+            model_id=model_id or "deepseek-ai/deepseek-coder-6.7b-instruct",
+            device=device,
+        )
+    if name == "qwen":
+        return QwenCoder(
+            model_id=model_id or "Qwen/Qwen2.5-Coder-7B-Instruct",
+            device=device,
+        )
+    if name == "llada":
+        return LLaDACoder(
+            model_id=model_id or "GSAI-ML/LLaDA-8B-Instruct",
+            device=device,
+        )
     raise ValueError(f"Unknown model: {name}")
 
 
@@ -101,7 +123,11 @@ def build_evalplus_solution(prob: dict, gen: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", choices=["dream", "deepseek"], required=True)
+    ap.add_argument(
+        "--model",
+        choices=["dream", "deepseek", "qwen", "llada"],
+        required=True,
+    )
     ap.add_argument("--dataset", choices=["humaneval", "mbpp"], required=True)
 
     ap.add_argument("--out", required=True)

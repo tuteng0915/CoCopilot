@@ -1,0 +1,23 @@
+{
+  "model": "dreamon_inpaint",
+  "dataset": "mbpp",
+  "source_eval_file": "/model/tteng/Coder/outputs/inpaint/deepseek_mbpp_dreamon_inpaint_token_eval-sanitized_eval_results.json",
+  "date": "2026-03-02 19:01",
+  "hash": "ee43ecabebf20deef4bb776a405ac5b1",
+  "pass_at_k": {},
+  "summary": {
+    "n_tasks": 378,
+    "n_samples_total": 378,
+    "n_base_pass": 283,
+    "n_plus_pass": 246,
+    "n_both_pass": 245,
+    "base_status_counts": {
+      "pass": 283,
+      "fail": 95
+    },
+    "plus_status_counts": {
+      "pass": 246,
+      "fail": 132
+    }
+  }
+}
