@@ -1,6 +1,0 @@
-[submodule "third_party/Dream-Coder"]
-	path = third_party/Dream-Coder
-	url = https://github.com/DreamLM/Dream-Coder
-[submodule "third_party/DeepSeek-Coder"]
-	path = third_party/DeepSeek-Coder
-	url = https://github.com/deepseek-ai/DeepSeek-Coder

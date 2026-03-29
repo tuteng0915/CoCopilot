@@ -103,6 +103,8 @@ class DreamCoder(CoderModel):
         draft: str,
         confidence_threshold: float = 0.5,
         mask_ratio: float | None = None,
+        mask_granularity: str = "token",
+        span_merge_gap: int = 0,
     ) -> str:
         """
         Score the DeepSeek draft, remask low-confidence tokens, and regenerate
@@ -114,6 +116,12 @@ class DreamCoder(CoderModel):
             confidence_threshold: Mask tokens where P(token) < threshold.
             mask_ratio: Alternative — mask the bottom K% least-confident tokens.
                         If set, takes precedence over confidence_threshold.
+            mask_granularity: token | span | line.
+              - token: mask individual low-confidence tokens (default; old behavior).
+              - span: merge low-confidence tokens into spans (optionally bridging small gaps).
+              - line: if any token on a line is low-confidence, mask the entire line.
+            span_merge_gap: for span-level masking, also mask gaps of <= this many tokens
+              between masked tokens (helps reduce fragmented masks).
         """
         mask_token_id = self.model.config.mask_token_id
 
@@ -145,6 +153,44 @@ class DreamCoder(CoderModel):
             mask_pos = confidence <= threshold_val
         else:
             mask_pos = confidence < confidence_threshold
+
+        # Apply granularity transforms on mask_pos
+        gran = (mask_granularity or "token").lower().strip()
+        if gran not in ("token", "span", "line"):
+            raise ValueError(f"Unsupported mask_granularity: {mask_granularity}")
+
+        if gran == "span":
+            gap = max(int(span_merge_gap), 0)
+            if gap > 0:
+                # Bridge small unmasked gaps between masked tokens.
+                mp = mask_pos.clone()
+                idx = torch.nonzero(mp, as_tuple=False).view(-1)
+                if idx.numel() > 0:
+                    # Fill gaps between consecutive masked indices if gap <= span_merge_gap.
+                    for a, b in zip(idx[:-1], idx[1:]):
+                        d = int(b.item() - a.item())
+                        if 1 < d <= gap + 1:
+                            mp[a + 1 : b] = True
+                mask_pos = mp
+        elif gran == "line":
+            # Map token indices -> line index by decoding token-by-token.
+            line_ids = []
+            cur_line = 0
+            for tid in comp_ids[0].tolist():
+                s = self.tok.decode([tid], skip_special_tokens=False)
+                line_ids.append(cur_line)
+                cur_line += s.count("\n")
+            # If any token in a line is masked, mask the full line.
+            masked_lines = set()
+            for i, m in enumerate(mask_pos.tolist()):
+                if m:
+                    masked_lines.add(line_ids[i])
+            if masked_lines:
+                mask_pos = torch.tensor(
+                    [ln in masked_lines for ln in line_ids],
+                    device=mask_pos.device,
+                    dtype=torch.bool,
+                )
 
         if not mask_pos.any():
             return draft  # all tokens are confident enough — nothing to do

@@ -6,7 +6,7 @@
 ###############################################################################
 
 ## 1) 单次 DeepSeek-Coder on HumanEval
-# python scripts/gen_evalplus.py \
+# python -m coder.scripts.gen_evalplus \
 #   --model deepseek \
 #   --dataset humaneval \
 #   --out outputs/deepseek_humaneval.jsonl \
@@ -15,11 +15,11 @@
 #   --top_p 1.0 \
 #   --seed 3407
 #
-# python scripts/postprocess_evalplus.py \
+# python -m coder.scripts.postprocess_evalplus \
 #   --dataset humaneval \
 #   --samples outputs/deepseek_humaneval.jsonl
 #
-# python scripts/eval_evalplus.py \
+# python -m coder.scripts.eval_evalplus \
 #   --backend local \
 #   --dataset humaneval \
 #   --samples outputs/deepseek_humaneval-sanitized.jsonl
@@ -27,36 +27,36 @@
 
 ## 2) 多次 roll-out + pass@k（HumanEval）
 # # 生成多次 roll-out（不同 seed）
-# python scripts/gen_evalplus.py --model deepseek --dataset humaneval \
+# python -m coder.scripts.gen_evalplus --model deepseek --dataset humaneval \
 #   --out outputs/deepseek_humaneval_seed3407.jsonl --max_new_tokens 512 \
 #   --temperature 0.7 --top_p 0.95 --seed 3407
-# python scripts/gen_evalplus.py --model deepseek --dataset humaneval \
+# python -m coder.scripts.gen_evalplus --model deepseek --dataset humaneval \
 #   --out outputs/deepseek_humaneval_seed3408.jsonl --max_new_tokens 512 \
 #   --temperature 0.7 --top_p 0.95 --seed 3408
-# python scripts/gen_evalplus.py --model deepseek --dataset humaneval \
+# python -m coder.scripts.gen_evalplus --model deepseek --dataset humaneval \
 #   --out outputs/deepseek_humaneval_seed3409.jsonl --max_new_tokens 512 \
 #   --temperature 0.7 --top_p 0.95 --seed 3409
 #
 # # 合并为一个多样本文件，再做 sanitize + eval（EvalPlus 会自动算 pass@k）
 # cat outputs/deepseek_humaneval_seed*.jsonl > outputs/deepseek_multi_humaneval.jsonl
-# python scripts/postprocess_evalplus.py \
+# python -m coder.scripts.postprocess_evalplus \
 #   --dataset humaneval \
 #   --samples outputs/deepseek_multi_humaneval.jsonl
-# python scripts/eval_evalplus.py \
+# python -m coder.scripts.eval_evalplus \
 #   --backend local \
 #   --dataset humaneval \
 #   --samples outputs/deepseek_multi_humaneval-sanitized.jsonl
 
 
 ## 3) LiveBench-Coding DeepSeek → DreamCoder remask
-# python scripts/gen_livebench.py \
+# python -m coder.scripts.gen_livebench \
 #   --model deepseek \
 #   --out outputs/deepseek_livebench.jsonl \
 #   --max_new_tokens 768 \
 #   --temperature 0.0 \
 #   --top_p 1.0
 #
-# python scripts/gen_remask.py \
+# python -m coder.scripts.gen_remask \
 #   --input outputs/deepseek_livebench.jsonl \
 #   --out   outputs/remask_livebench_t0.8.jsonl \
 #   --confidence_threshold 0.8 \
@@ -64,19 +64,19 @@
 #   --top_p 1.0 \
 #   --seed 3407
 #
-# python scripts/eval_livebench.py \
+# python -m coder.scripts.eval_livebench \
 #   --samples outputs/deepseek_livebench.jsonl \
 #   --out_judgments outputs/deepseek_livebench_judgments.jsonl \
 #   --out_summary   outputs/deepseek_livebench_summary.json
 #
-# python scripts/eval_livebench.py \
+# python -m coder.scripts.eval_livebench \
 #   --samples outputs/remask_livebench_t0.8.jsonl \
 #   --out_judgments outputs/remask_livebench_t0.8_judgments.jsonl \
 #   --out_summary   outputs/remask_livebench_t0.8_summary.json
 
 
 ## 4) EvalPlus DeepSeek → Self-Refine（HumanEval）
-# python scripts/gen_self_refine.py \
+# python -m coder.scripts.gen_self_refine \
 #   --input outputs/deepseek_humaneval.jsonl \
 #   --out   outputs/selfrefine_deepseek_humaneval.jsonl \
 #   --model deepseek \
@@ -85,18 +85,18 @@
 #   --top_p 0.95 \
 #   --seed 3407
 #
-# python scripts/postprocess_evalplus.py \
+# python -m coder.scripts.postprocess_evalplus \
 #   --dataset humaneval \
 #   --samples outputs/selfrefine_deepseek_humaneval.jsonl
 #
-# python scripts/eval_evalplus.py \
+# python -m coder.scripts.eval_evalplus \
 #   --backend local \
 #   --dataset humaneval \
 #   --samples outputs/selfrefine_deepseek_humaneval-sanitized.jsonl
 
 
 ## 5) EvalPlus DeepSeek + Reranking（HumanEval）
-# python scripts/gen_rerank.py \
+# python -m coder.scripts.gen_rerank \
 #   --model deepseek \
 #   --dataset humaneval \
 #   --out outputs/rerank_deepseek_humaneval.jsonl \
@@ -106,11 +106,11 @@
 #   --top_p 0.95 \
 #   --seed 3407
 #
-# python scripts/postprocess_evalplus.py \
+# python -m coder.scripts.postprocess_evalplus \
 #   --dataset humaneval \
 #   --samples outputs/rerank_deepseek_humaneval.jsonl
 #
-# python scripts/eval_evalplus.py \
+# python -m coder.scripts.eval_evalplus \
 #   --backend local \
 #   --dataset humaneval \
 #   --samples outputs/rerank_deepseek_humaneval-sanitized.jsonl
@@ -136,7 +136,7 @@ set -euo pipefail
 #   bash scripts/exp_examples.sh rerank
 ###############################################################################
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 
 
@@ -144,7 +144,7 @@ evalplus_single() {
   local dataset="${1:-humaneval}"  # humaneval | mbpp
 
   # DeepSeek-Coder single rollout
-  python scripts/gen_evalplus.py \
+  python -m coder.scripts.gen_evalplus \
     --model deepseek \
     --dataset "${dataset}" \
     --out "outputs/deepseek_${dataset}.jsonl" \
@@ -153,11 +153,11 @@ evalplus_single() {
     --top_p 1.0 \
     --seed 3407
 
-  python scripts/postprocess_evalplus.py \
+  python -m coder.scripts.postprocess_evalplus \
     --dataset "${dataset}" \
     --samples "outputs/deepseek_${dataset}.jsonl"
 
-  python scripts/eval_evalplus.py \
+  python -m coder.scripts.eval_evalplus \
     --backend local \
     --dataset "${dataset}" \
     --samples "outputs/deepseek_${dataset}-sanitized.jsonl"
@@ -173,7 +173,7 @@ evalplus_multi() {
 
   # 1) Generate multiple rollouts with different seeds (one sample / task / seed).
   for s in "${seeds[@]}"; do
-    python scripts/gen_evalplus.py \
+    python -m coder.scripts.gen_evalplus \
       --model deepseek \
       --dataset "${dataset}" \
       --out "outputs/${base}_seed${s}.jsonl" \
@@ -187,11 +187,11 @@ evalplus_multi() {
   cat "outputs/${base}_seed"*.jsonl > "outputs/${base}.jsonl"
 
   # 3) Sanitize once and evaluate; EvalPlus will compute pass@k from multi-samples.
-  python scripts/postprocess_evalplus.py \
+  python -m coder.scripts.postprocess_evalplus \
     --dataset "${dataset}" \
     --samples "outputs/${base}.jsonl"
 
-  python scripts/eval_evalplus.py \
+  python -m coder.scripts.eval_evalplus \
     --backend local \
     --dataset "${dataset}" \
     --samples "outputs/${base}-sanitized.jsonl"
@@ -200,7 +200,7 @@ evalplus_multi() {
 
 livebench_remask() {
   # 1) Generate LiveBench-Coding answers with DeepSeek-Coder (AR).
-  python scripts/gen_livebench.py \
+  python -m coder.scripts.gen_livebench \
     --model deepseek \
     --out outputs/deepseek_livebench.jsonl \
     --max_new_tokens 768 \
@@ -208,7 +208,7 @@ livebench_remask() {
     --top_p 1.0
 
   # 2) Refine with DreamCoder token remasking (uses prompt/raw_completion from gen_livebench.py).
-  python scripts/gen_remask.py \
+  python -m coder.scripts.gen_remask \
     --input outputs/deepseek_livebench.jsonl \
     --out   outputs/remask_livebench_t0.8.jsonl \
     --confidence_threshold 0.8 \
@@ -217,12 +217,12 @@ livebench_remask() {
     --seed 3407
 
   # 3) Evaluate both AR and remasked outputs on LiveBench-Coding.
-  python scripts/eval_livebench.py \
+  python -m coder.scripts.eval_livebench \
     --samples outputs/deepseek_livebench.jsonl \
     --out_judgments outputs/deepseek_livebench_judgments.jsonl \
     --out_summary   outputs/deepseek_livebench_summary.json
 
-  python scripts/eval_livebench.py \
+  python -m coder.scripts.eval_livebench \
     --samples outputs/remask_livebench_t0.8.jsonl \
     --out_judgments outputs/remask_livebench_t0.8_judgments.jsonl \
     --out_summary   outputs/remask_livebench_t0.8_summary.json
@@ -237,7 +237,7 @@ self_refine() {
   local in_path="outputs/deepseek_${dataset}.jsonl"
   local out_path="outputs/selfrefine_deepseek_${dataset}.jsonl"
 
-  python scripts/gen_self_refine.py \
+  python -m coder.scripts.gen_self_refine \
     --input "${in_path}" \
     --out   "${out_path}" \
     --model deepseek \
@@ -246,11 +246,11 @@ self_refine() {
     --top_p 0.95 \
     --seed 3407
 
-  python scripts/postprocess_evalplus.py \
+  python -m coder.scripts.postprocess_evalplus \
     --dataset "${dataset}" \
     --samples "${out_path}"
 
-  python scripts/eval_evalplus.py \
+  python -m coder.scripts.eval_evalplus \
     --backend local \
     --dataset "${dataset}" \
     --samples "${out_path%-*.jsonl}-sanitized.jsonl"
@@ -260,7 +260,7 @@ self_refine() {
 rerank() {
   local dataset="${1:-humaneval}"  # humaneval | mbpp
 
-  python scripts/gen_rerank.py \
+  python -m coder.scripts.gen_rerank \
     --model deepseek \
     --dataset "${dataset}" \
     --out "outputs/rerank_deepseek_${dataset}.jsonl" \
@@ -270,11 +270,11 @@ rerank() {
     --top_p 0.95 \
     --seed 3407
 
-  python scripts/postprocess_evalplus.py \
+  python -m coder.scripts.postprocess_evalplus \
     --dataset "${dataset}" \
     --samples "outputs/rerank_deepseek_${dataset}.jsonl"
 
-  python scripts/eval_evalplus.py \
+  python -m coder.scripts.eval_evalplus \
     --backend local \
     --dataset "${dataset}" \
     --samples "outputs/rerank_deepseek_${dataset}-sanitized.jsonl"
