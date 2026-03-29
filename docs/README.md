@@ -22,4 +22,5 @@
 - `docs/pitfalls.md`：已知坑位与对策（覆盖提示、字段缺失等）
 - `docs/ablation_ideas.md`：消融实验与小实验想法（含 mask 粒度与 AR logprob 方向）
 - `docs/TODO_reflexion_evalplus_feedback.md`：EvalPlus「真实失败反馈」Reflexion baseline 的待办与实现路线
+- `docs/rebuttal-experiments-tracker.md`：NeurIPS rebuttal 承诺的实验与待填表汇总（与论文 `rebuttal.tex` 对齐）
 
