@@ -10,6 +10,7 @@ from tqdm import tqdm
 from evalplus.data import get_human_eval_plus, get_mbpp_plus
 
 from coder.utils.schema import ModelRequest, SampleRecord
+from coder.utils.code_cleaning import clean_model_completion as _clean_model_completion
 from coder.models import (
     CoderModel,
     DreamCoder,
@@ -123,34 +124,7 @@ def write_override_dataset_gz(out_path: str, selected: List[Tuple[str, Dict]]):
             f.write(json.dumps(problem, ensure_ascii=False) + "\n")
 
 def clean_model_completion(text: str, prompt: str | None = None) -> str:
-    if not text:
-        return ""
-
-    s = text.strip()
-
-    # Prefer fenced code block if present
-    fence_blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", s, flags=re.S | re.I)
-    if fence_blocks:
-        s = fence_blocks[-1].strip()
-
-    s = s.replace("```python", "").replace("```", "").strip()
-
-    # Remove exact prompt echo if present
-    if prompt:
-        p = prompt.strip()
-        if p and s.startswith(p):
-            s = s[len(p):].lstrip()
-
-    # Remove common assistant-style preamble
-    s = re.sub(r"^\s*(assistant|response)\s*:\s*", "", s, flags=re.I)
-
-    # If we can find a code start, cut to it.
-    # (Do NOT force this when the model returns body-only completion.)
-    m = re.search(r"(?m)^(def|class|import|from|@)\s+", s)
-    if m:
-        s = s[m.start():].lstrip()
-
-    return s.strip()
+    return _clean_model_completion(text, prompt=prompt)
 
 
 def build_evalplus_solution(prob: dict, gen: str) -> str:

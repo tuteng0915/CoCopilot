@@ -7,6 +7,7 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 
 from coder.models.base import CoderModel
+from coder.utils.code_cleaning import clean_model_completion
 from coder.utils.schema import ModelRequest
 
 
@@ -35,42 +36,7 @@ class DreamCoder(CoderModel):
         return f"dream_coder::{self.model_id}"
 
     def _clean_completion(self, text: str, prompt: str) -> str:
-        """
-        Best-effort cleanup for:
-        - prompt echo
-        - markdown code fences
-        - assistant prose before code
-
-        Keep this conservative: if the model returns body-only completion, don't over-trim.
-        """
-        if not text:
-            return ""
-
-        s = text.strip()
-
-        # 1) Remove exact prompt echo (full prompt) if present
-        p = (prompt or "").strip()
-        if p and s.startswith(p):
-            s = s[len(p) :].lstrip()
-
-        # 2) Prefer fenced code block if present
-        fence_blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", s, flags=re.S | re.I)
-        if fence_blocks:
-            s = fence_blocks[-1].strip()
-
-        # 3) Remove leftover fence markers
-        s = s.replace("```python", "").replace("```", "").strip()
-
-        # 4) Remove common assistant-style prefixes
-        s = re.sub(r"^\s*(assistant|response)\s*:\s*", "", s, flags=re.I)
-
-        # 5) If there is an obvious code start, cut to it.
-        #    (Do not force this when output is body-only completion.)
-        m = re.search(r"(?m)^(def|class|import|from|@)\s+", s)
-        if m:
-            s = s[m.start() :].lstrip()
-
-        return s.strip()
+        return clean_model_completion(text, prompt=prompt)
 
     @torch.inference_mode()
     def score_tokens(

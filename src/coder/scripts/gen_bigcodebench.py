@@ -1,6 +1,7 @@
 import argparse
 import json
 import random
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +23,20 @@ from coder.models import (
     StarCoder2Coder,
 )
 from coder.utils.schema import ModelRequest
+from coder.utils.code_cleaning import build_prompt_scaffold_solution
+from coder.utils.sharding import take_shard, validate_shard_args
+
+
+def load_id_file(path: Optional[str]) -> Optional[set[str]]:
+    if not path:
+        return None
+    ids: set[str] = set()
+    with Path(path).open("r", encoding="utf-8") as f:
+        for line in f:
+            value = line.strip()
+            if value:
+                ids.add(value)
+    return ids
 
 
 def build_model(name: str, device: str, model_id: Optional[str] = None):
@@ -65,6 +80,16 @@ def get_prompt(row: Dict[str, Any], split_mode: str) -> str:
     return str(row.get("complete_prompt", "")).strip()
 
 
+def build_generation_prompt(prompt: str) -> str:
+    prompt = (prompt or "").strip()
+    instruction = (
+        "Write a self-contained Python solution. "
+        "Only output valid Python code. "
+        "Do not include explanations, markdown fences, or surrounding text."
+    )
+    return f"{instruction}\n\n{prompt}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -73,7 +98,10 @@ def main():
     ap.add_argument("--split", choices=["instruct", "complete"], default="instruct")
     ap.add_argument("--subset", choices=["full", "hard"], default="full")
     ap.add_argument("--revision", default="v0.1.0_hf", help="HF split name, e.g. v0.1.0_hf")
+    ap.add_argument("--task_ids_file", default=None, help="Optional newline-delimited task_id filter.")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--num_shards", type=int, default=1)
+    ap.add_argument("--shard_idx", type=int, default=0)
     ap.add_argument("--shuffle", action="store_true")
     ap.add_argument("--seed", type=int, default=3407)
     ap.add_argument("--max_new_tokens", type=int, default=1280)
@@ -82,16 +110,24 @@ def main():
     ap.add_argument("--out", required=True, help="outputs/{model}_bigcodebench_{split}.jsonl")
     ap.add_argument("--resume", action="store_true")
     args = ap.parse_args()
+    try:
+        validate_shard_args(num_shards=args.num_shards, shard_idx=args.shard_idx)
+    except ValueError as e:
+        ap.error(str(e))
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     model = build_model(args.model, device=args.device, model_id=args.model_id)
     rows = load_bigcodebench_rows(subset=args.subset, revision=args.revision)
+    task_id_filter = load_id_file(args.task_ids_file)
+    if task_id_filter:
+        rows = [row for row in rows if str(row.get("task_id", "")).strip() in task_id_filter]
 
     if args.shuffle:
         rng = random.Random(args.seed)
         rng.shuffle(rows)
+    rows = take_shard(rows, num_shards=args.num_shards, shard_idx=args.shard_idx)
     if args.limit is not None:
         rows = rows[:args.limit]
 
@@ -110,6 +146,10 @@ def main():
                 except Exception:
                     continue
 
+    t_total0 = time.perf_counter()
+    timing_generate_s: list[float] = []
+    n_records_written = 0
+
     with out_path.open("a", encoding="utf-8") as fout:
         for row in tqdm(rows, desc=f"gen_bigcodebench({model.name})"):
             task_id = str(row.get("task_id", "")).strip()
@@ -118,9 +158,10 @@ def main():
             if task_id in done_task_ids:
                 continue
 
-            prompt = get_prompt(row, split_mode=args.split)
-            if not prompt:
+            source_prompt = get_prompt(row, split_mode=args.split)
+            if not source_prompt:
                 continue
+            prompt = build_generation_prompt(source_prompt)
 
             req = ModelRequest(
                 prompt=prompt,
@@ -129,7 +170,11 @@ def main():
                 top_p=args.top_p,
                 seed=args.seed,
             )
-            completion = model.generate(req)
+            t0 = time.perf_counter()
+            raw_gen = model.generate(req)
+            t1 = time.perf_counter()
+            completion = build_prompt_scaffold_solution(req.prompt, raw_gen)
+            timing_generate_s.append(t1 - t0)
 
             rec = {
                 "task_id": task_id,
@@ -137,23 +182,50 @@ def main():
                 "split": args.split,
                 "subset": args.subset,
                 "revision": args.revision,
-                "prompt": prompt,
+                "prompt": req.prompt,
+                "source_prompt": source_prompt,
+                "raw_generation": raw_gen,
+                "raw_completion": completion,
                 "solution": completion,
-                "raw_solution": completion,
+                "raw_solution": raw_gen,
                 "model": model.name,
                 "gen": {
                     "max_new_tokens": args.max_new_tokens,
                     "temperature": args.temperature,
                     "top_p": args.top_p,
                     "seed": args.seed,
+                    "timing": {
+                        "generate_s": t1 - t0,
+                        "total_s": t1 - t0,
+                    },
                 },
             }
             fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
             fout.flush()
+            n_records_written += 1
 
+    t_total1 = time.perf_counter()
+    timing_path = str(out_path) + ".timing_summary.json"
+    summary = {
+        "script": "gen_bigcodebench",
+        "out": str(out_path.resolve()),
+        "model": model.name,
+        "split": args.split,
+        "subset": args.subset,
+        "revision": args.revision,
+        "num_shards": args.num_shards,
+        "shard_idx": args.shard_idx,
+        "n_records_written": n_records_written,
+        "timing": {
+            "total_s": t_total1 - t_total0,
+            "generate_s_total": float(sum(timing_generate_s)),
+            "generate_s_avg": (float(sum(timing_generate_s)) / len(timing_generate_s)) if timing_generate_s else None,
+        },
+    }
+    Path(timing_path).write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[timing] wrote {timing_path}")
     print(f"[samples] wrote {out_path}")
 
 
 if __name__ == "__main__":
     main()
-

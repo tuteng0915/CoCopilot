@@ -1,4 +1,7 @@
-# TODO：EvalPlus「真实失败反馈」Reflexion Baseline
+> **实现已完成**：详见 [`docs/done/reflexion_evalplus_feedback.md`](done/reflexion_evalplus_feedback.md)。
+> 待跑实验追踪见 [`docs/experiments-tracker.md`](experiments-tracker.md) §待跑数据。
+
+# [已归档] TODO：EvalPlus「真实失败反馈」Reflexion Baseline
 
 目标：实现更贴近 Reflexion（Shinn et al., 2023）的 baseline —— **使用真实执行/评测失败反馈**驱动 reflection→revise（先只在 EvalPlus 上实现）。
 
@@ -14,7 +17,7 @@
 
 ## 待办清单（按依赖顺序）
 
-### 1) EvalPlus 失败反馈抽取器（核心）
+### 1) EvalPlus 失败反馈抽取器（核心）✅
 
 - **任务**：从 EvalPlus 评测产物中抽取每个 `task_id` 的失败摘要，生成 `feedback.jsonl`（一行一个 task）。
 - **输入**：
@@ -30,7 +33,7 @@
 
 > 备注：这一块需要兼容不同版本 evalplus 的结果文件命名/字段差异。
 
-### 2) 扩展 `gen_reflexion.py`：自动 join 失败反馈（推荐）
+### 2) 扩展 `gen_reflexion.py`：自动 join 失败反馈（推荐）✅
 
 - **任务**：在 `src/coder/scripts/gen_reflexion.py` 新增参数：
   - `--feedback_file outputs/...feedback.jsonl`
@@ -50,7 +53,7 @@
   - 若 evalplus 版本差异导致输出不稳定，wrapper 需要做“探测/兼容”
   - 最终保证抽取器（TODO 1）能稳定拿到失败信息
 
-### 4) 文档与命令模板
+### 4) 文档与命令模板 ✅
 
 - **任务**：将最终可复现命令写入 `docs/runbook.md`（或另起一节），并在 `docs/ablation_ideas.md` 里更新 Reflexion 部分：
   - 产物命名约定

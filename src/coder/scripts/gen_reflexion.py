@@ -50,6 +50,25 @@ def read_jsonl(path: str) -> Iterable[Dict[str, Any]]:
                 yield json.loads(line)
 
 
+def infer_raw_input_path(input_path: str) -> Optional[Path]:
+    p = Path(input_path)
+    name = p.name
+    if name.endswith("-sanitized.jsonl"):
+        return p.with_name(name.replace("-sanitized.jsonl", ".jsonl"))
+    if name.endswith("_sanitized.jsonl"):
+        return p.with_name(name.replace("_sanitized.jsonl", ".jsonl"))
+    return None
+
+
+def load_task_map(path: str) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for obj in read_jsonl(path):
+        tid = obj.get("task_id")
+        if isinstance(tid, str) and tid:
+            out[tid] = obj
+    return out
+
+
 def build_model(name: str, device: str, model_id: Optional[str]) -> CoderModel:
     name = (name or "").lower()
     if name in ["deepseek", "deepseek_coder", "ds"]:
@@ -100,13 +119,32 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Reflexion baseline (reflection + revise), default 1 round.")
     ap.add_argument("--input", required=True, help="Input JSONL from AR generation (EvalPlus or LiveBench).")
     ap.add_argument("--out", required=True, help="Output JSONL path for reflexion-refined samples.")
+    ap.add_argument(
+        "--raw_input",
+        default=None,
+        help="Optional raw JSONL with prompt/raw_completion to backfill sanitized --input records by task_id.",
+    )
 
     ap.add_argument("--model", required=True, help="Backbone model to generate reflection/revision.")
     ap.add_argument("--model_id", default=None, help="Override model id.")
     ap.add_argument("--device", default="cuda")
 
     ap.add_argument("--rounds", type=int, default=1, help="Number of reflexion rounds (default 1).")
-    ap.add_argument("--feedback_key", default=None, help="Optional key (supports dotted) to include feedback text.")
+    ap.add_argument(
+        "--feedback_key",
+        default=None,
+        help="Optional key (supports dotted) to include feedback text directly from input JSONL.",
+    )
+    ap.add_argument(
+        "--feedback_file",
+        default=None,
+        help="Optional JSONL with per-task feedback (task_id-aligned), e.g. produced by coder.analysis.evalplus_feedback.",
+    )
+    ap.add_argument(
+        "--feedback_field",
+        default="failure_summary",
+        help="When --feedback_file is used, pick this field as prompt feedback text (default: failure_summary).",
+    )
 
     ap.add_argument("--max_new_tokens_reflection", type=int, default=256)
     ap.add_argument("--max_new_tokens", type=int, default=512)
@@ -133,8 +171,40 @@ def main() -> None:
 
     model = build_model(args.model, device=args.device, model_id=args.model_id)
 
+    feedback_map: Dict[str, Dict[str, Any]] = {}
+    if args.feedback_file:
+        fb_path = Path(args.feedback_file)
+        if not fb_path.exists():
+            print(f"[warn] --feedback_file {fb_path} does not exist; ignoring.")
+        else:
+            for obj in read_jsonl(str(fb_path)):
+                tid = obj.get("task_id")
+                if isinstance(tid, str) and tid:
+                    feedback_map[tid] = obj
+
     records = list(read_jsonl(args.input))
     print(f"[info] {len(records)} records loaded from {args.input}")
+
+    raw_input_path: Optional[Path] = None
+    if args.raw_input:
+        raw_input_path = Path(args.raw_input)
+    else:
+        raw_input_path = infer_raw_input_path(args.input)
+
+    raw_map: Dict[str, Dict[str, Any]] = {}
+    needs_raw_backfill = any(
+        not str(rec.get("prompt", "")).strip() or not str(rec.get("raw_completion", "")).strip()
+        for rec in records
+    )
+    if needs_raw_backfill and raw_input_path and raw_input_path.exists():
+        raw_map = load_task_map(str(raw_input_path))
+        print(f"[info] loaded raw backfill for {len(raw_map)} tasks from {raw_input_path}")
+    elif needs_raw_backfill:
+        hinted = str(raw_input_path) if raw_input_path else "<none>"
+        print(
+            "[warn] some input records miss prompt/raw_completion, "
+            f"but raw backfill is unavailable: {hinted}"
+        )
 
     t_total0 = time.perf_counter()
     timing_reflect_s: list[float] = []
@@ -149,12 +219,33 @@ def main() -> None:
             if task_id in done_ids:
                 continue
 
-            is_livebench = "question_id" in rec or str(task_id).startswith("LiveBench/") or str(task_id).startswith("LiveCodeBench/")
-            prompt_text: str = rec.get("prompt", "")
-            draft0: str = rec.get("raw_completion", "") or rec.get("solution", "")
+            raw_rec = raw_map.get(task_id, {})
+
+            is_livebench = (
+                "question_id" in rec
+                or "question_id" in raw_rec
+                or str(task_id).startswith("LiveBench/")
+                or str(task_id).startswith("LiveCodeBench/")
+            )
+            prompt_text: str = rec.get("prompt", "") or raw_rec.get("prompt", "")
+            draft0: str = (
+                rec.get("raw_completion", "")
+                or raw_rec.get("raw_completion", "")
+                or rec.get("solution", "")
+                or raw_rec.get("solution", "")
+            )
 
             feedback_text = ""
-            if args.feedback_key:
+            # 1) Prefer external feedback_file if provided
+            if args.feedback_file and task_id in feedback_map:
+                fb = feedback_map[task_id]
+                v = get_nested(fb, args.feedback_field)
+                if isinstance(v, str) and v.strip():
+                    feedback_text = v.strip()
+                else:
+                    feedback_text = json.dumps(fb, ensure_ascii=False)
+            # 2) Fallback to feedback_key in input JSONL
+            elif args.feedback_key:
                 v = get_nested(rec, args.feedback_key)
                 if isinstance(v, str) and v.strip():
                     feedback_text = v.strip()
@@ -265,6 +356,10 @@ def main() -> None:
                     "top_p": args.top_p,
                     "seed": args.seed,
                     "feedback_key": args.feedback_key,
+                    "feedback_field": args.feedback_field,
+                    "feedback_source": ("feedback_file" if (args.feedback_file and task_id in feedback_map) else ("input_field" if args.feedback_key else None)),
+                    "raw_input": str(raw_input_path) if raw_map else None,
+                    "feedback": feedback_text if feedback_text else None,
                     "timing": {
                         "reflect_s_total": float(sum([x["timing"]["reflect_s"] for x in trace])) if trace else 0.0,
                         "revise_s_total": float(sum([x["timing"]["revise_s"] for x in trace])) if trace else 0.0,
@@ -272,14 +367,22 @@ def main() -> None:
                     },
                 },
             }
+            if feedback_text:
+                out_rec["eval_feedback"] = feedback_text
 
             if is_livebench:
                 if "question_id" in rec:
                     out_rec["question_id"] = rec["question_id"]
+                elif "question_id" in raw_rec:
+                    out_rec["question_id"] = raw_rec["question_id"]
                 if "meta" in rec:
                     out_rec["meta"] = rec["meta"]
+                elif "meta" in raw_rec:
+                    out_rec["meta"] = raw_rec["meta"]
                 if "benchmark" in rec:
                     out_rec["benchmark"] = rec["benchmark"]
+                elif "benchmark" in raw_rec:
+                    out_rec["benchmark"] = raw_rec["benchmark"]
 
             fout.write(json.dumps(out_rec, ensure_ascii=False) + "\n")
             fout.flush()
@@ -311,4 +414,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -39,9 +39,22 @@
 
 注意：这个 baseline 不是硬约束编辑（AR 可能会改动未 mask 部分），但通过 prompt 强约束“尽量保持不变”可以当作合理 ablation。
 
-## B. AR token logprob（建议做的 model study）
+## B. AR token logprob（已实现基础版）
 
-动机：当前 `gen_rerank.py` 用的是启发式 `score_candidate()`，而更合理的是使用 **AR 自己对候选的对数似然** 作为可解释的打分。
+动机：启发式 `score_candidate()` 可用但较粗糙；使用 **AR 自己对候选的对数似然** 能提供更可解释的 rerank 分数。
+
+当前实现：
+
+- `gen_rerank.py` 新增：
+  - `--score_mode {self_judge,heuristic,logprob}`（默认 `self_judge`）
+  - `--logprob_norm {avg,sum}`（默认 `avg`）
+- `self_judge`：同一模型做 listwise 选择（一次从 N 个候选里选最佳），作为默认 baseline
+- `logprob` 评分通过 teacher-forcing 计算 `sum_logprob / avg_logprob`
+- 每个候选在 `rerank_candidates` 里保留：
+  - `sum_logprob`
+  - `avg_logprob`
+  - `logprob_n_tokens`
+  - `logprob_error`（若模型不支持则回退 heuristic）
 
 两种常见做法：
 
@@ -54,7 +67,7 @@
    - 采样来自模型 A（更会“发散”）
    - 打分来自模型 B（更“稳/守规矩”）
 
-实现提示（待做）：
+实现提示（后续可继续增强）：
 
 - 对 HF `AutoModelForCausalLM`：
   - 拼接 `prompt_ids + completion_ids`
@@ -67,6 +80,10 @@
 
 - `sum_logprob`、`avg_logprob_per_token`
 - length normalization 是否引入偏好（短输出更占优）
+
+推荐最小命令：
+
+`python -m coder.scripts.gen_rerank --model <model> --dataset <humaneval|mbpp> --num_samples 8 --score_mode logprob --logprob_norm avg --out <...jsonl>`
 
 ## C. Reflexion baseline（Shinn et al., 2023）（已实现简化版）
 
@@ -82,6 +99,12 @@
 
 - `--rounds T`：多轮 reflexion（默认 1）
 - `--feedback_key KEY`：如果输入 JSONL 里包含某种“失败反馈”，可把该字段拼进 reflection prompt（支持 dotted key，如 `eval.error`）
+- `--feedback_file FILE` + `--feedback_field KEY`：按 `task_id` join 外部反馈文件（默认取 `failure_summary`）
+
+配套抽取器（EvalPlus）：
+
+- `python -m coder.analysis.evalplus_feedback --eval_results <..._eval_results.json> --out_feedback <...evalplus_feedback.jsonl>`
+- 输出字段：`task_id`、`passed_base`、`base_status`、`base_status_counts`、`failure_summary`（可选 `raw_details`）
 
 ## C. Pending：后续可做但先不实现（记录）
 

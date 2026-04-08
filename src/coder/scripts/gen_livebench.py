@@ -10,6 +10,8 @@ from datasets import load_dataset
 from huggingface_hub import hf_hub_download, list_repo_files
 
 from coder.utils.schema import ModelRequest
+from coder.utils.code_cleaning import clean_model_completion
+from coder.utils.sharding import take_shard, validate_shard_args
 from coder.models import (
     DreamCoder,
     DeepSeekCoder,
@@ -24,6 +26,18 @@ from coder.models import (
     SeedCoder,
     ApiCoder,
 )
+
+
+def load_id_file(path: Optional[str]) -> Optional[set[str]]:
+    if not path:
+        return None
+    ids: set[str] = set()
+    with Path(path).open("r", encoding="utf-8") as f:
+        for line in f:
+            value = line.strip()
+            if value:
+                ids.add(value)
+    return ids
 
 
 def resolve_dataset_name(benchmark: str) -> str:
@@ -102,10 +116,10 @@ def build_model(name: str, device: str, model_id: Optional[str] = None):
 def iter_livebench_coding(
     benchmark: str,
     split: str,
-    limit: Optional[int],
     shuffle: bool,
     seed: int,
     task_filter: Optional[List[str]] = None,
+    question_id_filter: Optional[set[str]] = None,
 ) -> List[Dict[str, Any]]:
     if benchmark == "livecodebench":
         if split != "test":
@@ -130,12 +144,17 @@ def iter_livebench_coding(
         task_filter_set = set(task_filter)
         items = [x for x in items if x.get("task") in task_filter_set]
 
+    if question_id_filter:
+        filtered: List[Dict[str, Any]] = []
+        for idx, row in enumerate(items):
+            qid = get_question_id(row, idx=idx, benchmark=benchmark)
+            if qid in question_id_filter:
+                filtered.append(row)
+        items = filtered
+
     if shuffle:
         rng = random.Random(seed)
         rng.shuffle(items)
-
-    if limit is not None:
-        items = items[:limit]
 
     return items
 
@@ -174,6 +193,16 @@ def get_task_name(row: Dict[str, Any]) -> str:
     return ""
 
 
+def build_generation_prompt(prompt: str) -> str:
+    prompt = (prompt or "").strip()
+    instruction = (
+        "Solve the following programming problem. "
+        "Only output valid Python code. "
+        "Do not include explanations, markdown fences, or surrounding text."
+    )
+    return f"{instruction}\n\n{prompt}"
+
+
 def read_existing_qids(path: Path) -> set:
     if not path.exists():
         return set()
@@ -206,7 +235,10 @@ def main():
     )
     ap.add_argument("--split", default="test")
     ap.add_argument("--task", action="append", default=None, help="Filter by task name, can repeat.")
+    ap.add_argument("--question_ids_file", default=None, help="Optional newline-delimited question_id filter.")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--num_shards", type=int, default=1)
+    ap.add_argument("--shard_idx", type=int, default=0)
     ap.add_argument("--shuffle", action="store_true")
     ap.add_argument("--seed", type=int, default=3407)
 
@@ -227,20 +259,28 @@ def main():
     args = ap.parse_args()
     if args.num_samples < 1:
         ap.error("--num_samples must be >= 1")
+    try:
+        validate_shard_args(num_shards=args.num_shards, shard_idx=args.shard_idx)
+    except ValueError as e:
+        ap.error(str(e))
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     model = build_model(args.model, device=args.device, model_id=args.model_id)
+    question_id_filter = load_id_file(args.question_ids_file)
 
     questions = iter_livebench_coding(
         benchmark=args.benchmark,
         split=args.split,
-        limit=args.limit,
         shuffle=args.shuffle,
         seed=args.seed,
         task_filter=args.task,
+        question_id_filter=question_id_filter,
     )
+    questions = take_shard(questions, num_shards=args.num_shards, shard_idx=args.shard_idx)
+    if args.limit is not None:
+        questions = questions[:args.limit]
 
     done_qids = read_existing_qids(out_path) if args.resume else set()
 
@@ -254,9 +294,10 @@ def main():
             if qid in done_qids:
                 continue
 
-            prompt = get_prompt(q)
-            if not prompt:
+            source_prompt = get_prompt(q)
+            if not source_prompt:
                 continue
+            prompt = build_generation_prompt(source_prompt)
 
             base_req = ModelRequest(
                 prompt=prompt,
@@ -278,8 +319,9 @@ def main():
                         seed=int(args.seed) + sample_idx,
                     )
                 t0 = time.perf_counter()
-                completion = model.generate(req)
+                raw_gen = model.generate(req)
                 t1 = time.perf_counter()
+                completion = clean_model_completion(raw_gen, prompt=req.prompt)
                 timing_generate_s.append(t1 - t0)
 
                 row = {
@@ -287,7 +329,9 @@ def main():
                     "question_id": qid,
                     "sample_id": sample_idx,
                     "benchmark": args.benchmark,
-                    "prompt": prompt,
+                    "prompt": req.prompt,
+                    "source_prompt": source_prompt,
+                    "raw_generation": raw_gen,
                     "raw_completion": completion,
                     # LiveBench 官方评测只看 solution 字段，这里保持向后兼容。
                     "solution": completion,
@@ -322,6 +366,8 @@ def main():
         "out": str(out_path.resolve()),
         "model": model.name,
         "benchmark": args.benchmark,
+        "num_shards": args.num_shards,
+        "shard_idx": args.shard_idx,
         "num_samples": args.num_samples,
         "n_records_written": n_records_written,
         "timing": {

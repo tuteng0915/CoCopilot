@@ -1,6 +1,9 @@
-# Rebuttal 实验与承诺追踪（NeurIPS rebuttal ↔ 代码库）
+> **此文档已迁移**：请使用 [`docs/experiments-tracker.md`](experiments-tracker.md)。
+> 已完成的实现进展见 [`docs/done/impl_progress_2026-03.md`](done/impl_progress_2026-03.md)。
 
-本文档汇总 `NeurIPS-26-CoCoder/rebuttal.tex` 中**承诺补做/附录呈现**的实验，以及仓库里**已实现但结果尚未写入论文表**的工作，便于与 `docs/ablation_ideas.md`、`docs/completion-checklist.md` 对齐。
+# [已归档] Rebuttal 实验与承诺追踪
+
+本文档已整合进 `docs/experiments-tracker.md`，保留此文件仅作历史参考。
 
 ---
 
@@ -40,6 +43,18 @@
 | Reranking 用 **AR logprob** 替代启发式打分 | `ablation_ideas.md` §B |
 | 多轮局部修补、组合管线（T 轮） | `ablation_ideas.md` §C |
 | **MLM 风格** refinement baseline | rebuttal 已列为 **future work**（公平对比需额外设计，见 `rebuttal.tex` JwDe W2） |
+
+### 4.1 本 session 进展（2026-03-30）
+
+- [x] `coder.analysis.evalplus_feedback`：支持更稳健的失败摘要抽取（含 `base_status_counts`、多字段详情兼容、`raw_details` 可选）
+- [x] `coder.scripts.gen_reflexion`：支持 `--feedback_field`，并在输出中记录 `gen.feedback` / `eval_feedback`
+- [x] `docs/runbook.md`：补充 EvalPlus 真实失败反馈版 Reflexion 命令模板与命名约定
+- [x] `docs/ablation_ideas.md`：补充 logprob rerank 与反馈驱动 Reflexion 的最新用法
+
+### 4.2 仍待跑数（脚本已就绪）
+
+- [ ] 在 HumanEval/MBPP 上各跑一组 `*_reflexion_feedback*.jsonl`，并汇总 pass@1 + latency
+- [ ] 在 HumanEval/MBPP 上各跑一组 `*_rerank_logprob_k8*.jsonl`，并汇总与 `self_judge/heuristic` 对比
 
 ---
 

@@ -8,6 +8,18 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+def load_id_file(path: Optional[str]) -> list[str]:
+    if not path:
+        return []
+    ids: list[str] = []
+    with Path(path).open("r", encoding="utf-8") as f:
+        for line in f:
+            value = line.strip()
+            if value:
+                ids.append(value)
+    return ids
+
+
 def infer_split_subset(samples_path: Path) -> tuple[str, str]:
     with samples_path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -62,6 +74,7 @@ def main():
     ap.add_argument("--parallel", type=int, default=None)
     ap.add_argument("--pass_k", default="1,5,10")
     ap.add_argument("--no_gt", action="store_true")
+    ap.add_argument("--task_ids_file", default=None, help="Optional newline-delimited task_id subset for selective evaluation.")
     ap.add_argument("--out_summary", required=True)
     ap.add_argument("--out_eval_results", default=None)
     args = ap.parse_args()
@@ -73,6 +86,7 @@ def main():
     inferred_split, inferred_subset = infer_split_subset(samples)
     split = args.split or inferred_split
     subset = args.subset or inferred_subset
+    selected_task_ids = load_id_file(args.task_ids_file)
 
     cmd = [
         "bigcodebench.evaluate",
@@ -88,6 +102,8 @@ def main():
         args.pass_k,
         "--save_pass_rate",
     ]
+    if selected_task_ids:
+        cmd += ["--selective_evaluate", ",".join(selected_task_ids)]
     if args.parallel is not None:
         cmd += ["--parallel", str(args.parallel)]
     if args.no_gt:
@@ -119,6 +135,8 @@ def main():
         "split": split,
         "subset": subset,
         "samples": str(samples),
+        "evaluated_task_count": len(selected_task_ids) if selected_task_ids else None,
+        "task_ids_file": str(Path(args.task_ids_file).resolve()) if args.task_ids_file else None,
         "eval_results_file": str(eval_path) if eval_path.exists() else None,
         "pass_at_k_file": str(passk_path) if passk_path.exists() else None,
         "pass_at_k": pass_at_k,
@@ -133,4 +151,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
