@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gen_remask.py — Refine DeepSeek-Coder (or other AR) drafts using DreamCoder token remasking.
+gen_remask.py — Refine AR drafts using DreamCoder/LLaDA token remasking.
 
 Pipeline:
   1. Load AR JSONL outputs (prompt + raw_completion per task).
@@ -8,16 +8,22 @@ Pipeline:
        fields: task_id, prompt, raw_completion, solution, model, gen
      - LiveBench-Coding: from scripts/gen_livebench.py
        fields: task_id, question_id, prompt, raw_completion, solution, model, gen, meta
+     - Math (GSM8K/MATH-500): from scripts/gen_math.py
+       fields: id, sample_id, question, prompt, answer_ref, raw_completion, dataset, model, gen
   2. For each task, score each completion token with DreamCoder's forward pass.
   3. Mask low-confidence tokens (by threshold or by ratio).
   4. Regenerate only the masked positions via DreamCoder diffusion.
-  5. Write refined JSONL (EvalPlus/LiveBench-compatible).
+  5. Write refined JSONL (format mirrors the input schema).
 
 Output JSONL (EvalPlus):
   task_id, prompt, draft_completion, raw_completion, solution, model, gen
 
 Output JSONL (LiveBench):
   task_id, question_id, prompt, draft_completion, raw_completion, solution, model, gen, meta
+
+Output JSONL (Math):
+  id, sample_id, question, prompt, answer_ref, dataset, draft_completion, raw_completion, model, gen
+  (subject, level preserved for MATH-500; compatible with eval_math.py)
 """
 from __future__ import annotations
 
@@ -65,6 +71,11 @@ def build_refiner(name: str, model_id: str, device: str):
     if name == "llada":
         return LLaDACoder(model_id=model_id, device=device)
     raise ValueError(f"Unsupported refiner: {name}")
+
+
+def is_math_record(rec: dict) -> bool:
+    """Math records from gen_math.py use 'id' + 'answer_ref' instead of 'task_id'."""
+    return "answer_ref" in rec and "id" in rec and "task_id" not in rec
 
 
 def infer_benchmark(rec: dict, task_id: str) -> str | None:
@@ -146,11 +157,11 @@ def main() -> None:
     except BlockingIOError as e:
         raise RuntimeError(f"Another gen_remask process is already writing to {out_path}") from e
 
-    # Resume: collect already-done task_ids
+    # Resume: collect already-done ids (support both task_id and math id)
     done_ids: set[str] = set()
     if args.resume and out_path.exists():
         for rec in read_jsonl(str(out_path)):
-            done_ids.add(rec["task_id"])
+            done_ids.add(rec.get("task_id") or rec.get("id") or "")
         print(f"[resume] skipping {len(done_ids)} already-done tasks.")
 
     records = list(read_jsonl(args.input))
@@ -191,12 +202,10 @@ def main() -> None:
 
     with out_path.open("a", encoding="utf-8") as fout:
         for rec in tqdm(records, desc="remask"):
-            task_id: str = rec["task_id"]
-            if task_id in done_ids:
+            math_mode = is_math_record(rec)
+            rec_id: str = rec.get("id") if math_mode else rec.get("task_id", "")
+            if rec_id in done_ids:
                 continue
-
-            benchmark = infer_benchmark(rec, task_id) or "evalplus"
-            is_livebench = benchmark in ("livebench-coding", "livecodebench")
 
             prompt_text: str = rec.get("prompt", "")
             draft: str = (
@@ -205,7 +214,9 @@ def main() -> None:
                 or rec.get("raw_solution")
                 or ""
             )
-            draft = clean_model_completion(draft, prompt_text)
+
+            if not math_mode:
+                draft = clean_model_completion(draft, prompt_text)
 
             req = ModelRequest(
                 prompt=prompt_text,
@@ -227,62 +238,85 @@ def main() -> None:
                 )
                 t1 = time.perf_counter()
             except Exception as e:
-                print(f"[warn] {task_id}: generate_with_remask failed ({e}); keeping draft.")
+                print(f"[warn] {rec_id}: generate_with_remask failed ({e}); keeping draft.")
                 refined = draft
                 t1 = time.perf_counter()
                 t0 = t1
 
             t_pack0 = time.perf_counter()
-            refined = clean_model_completion(refined, prompt_text)
-            # EvalPlus: 需要把 refined completion 封装成完整 solution 程序
-            # LiveBench: 官方评测直接使用 solution 字段，无需 prepend prompt。
-            if is_livebench:
-                solution = refined
-            elif benchmark == "bigcodebench":
-                solution = build_prompt_scaffold_solution(prompt_text, refined)
+            if math_mode:
+                # Math: no code solution wrapping needed; eval_math.py reads raw_completion directly.
+                pass
             else:
-                solution = build_evalplus_solution(prompt_text, refined)
+                benchmark = infer_benchmark(rec, rec_id) or "evalplus"
+                is_livebench = benchmark in ("livebench-coding", "livecodebench")
+                refined = clean_model_completion(refined, prompt_text)
+                if is_livebench:
+                    solution = refined
+                elif benchmark == "bigcodebench":
+                    solution = build_prompt_scaffold_solution(prompt_text, refined)
+                else:
+                    solution = build_evalplus_solution(prompt_text, refined)
             t_pack1 = time.perf_counter()
 
             timing_remask_s.append(t1 - t0)
             timing_pack_s.append(t_pack1 - t_pack0)
 
-            out_rec = {
-                "task_id":           task_id,
-                "benchmark":         benchmark,
-                "prompt":            prompt_text,
-                "draft_completion":  draft,       # original AR output
-                "raw_completion":    refined,     # diffusion-refined output
-                "solution":          solution,
-                "model":             model.name,
-                "gen": {
-                    "source_model":         rec.get("model", "unknown"),
-                    "refiner":              refiner_name,
-                    "confidence_threshold": args.confidence_threshold,
-                    "mask_ratio":           args.mask_ratio,
-                    "mask_granularity":     args.mask_granularity,
-                    "span_merge_gap":       args.span_merge_gap,
-                    "temperature":          args.temperature,
-                    "top_p":                args.top_p,
-                    "seed":                 args.seed,
-                    "timing": {
-                        "remask_generate_s": t1 - t0,
-                        "pack_solution_s": t_pack1 - t_pack0,
-                        "total_s": (t1 - t0) + (t_pack1 - t_pack0),
-                    },
+            gen_meta = {
+                "source_model":         rec.get("model", "unknown"),
+                "refiner":              refiner_name,
+                "confidence_threshold": args.confidence_threshold,
+                "mask_ratio":           args.mask_ratio,
+                "mask_granularity":     args.mask_granularity,
+                "span_merge_gap":       args.span_merge_gap,
+                "temperature":          args.temperature,
+                "top_p":                args.top_p,
+                "seed":                 args.seed,
+                "timing": {
+                    "remask_generate_s": t1 - t0,
+                    "pack_solution_s":   t_pack1 - t_pack0,
+                    "total_s":           (t1 - t0) + (t_pack1 - t_pack0),
                 },
             }
 
-            # LiveBench: 保留 question_id / meta，方便 eval_livebench.py 直接复用。
-            if is_livebench:
-                if "question_id" in rec:
-                    out_rec["question_id"] = rec["question_id"]
-                if "meta" in rec:
-                    out_rec["meta"] = rec["meta"]
-            if benchmark == "bigcodebench":
-                for key in ("split", "subset", "revision", "source_prompt"):
+            if math_mode:
+                out_rec = {
+                    "id":               rec_id,
+                    "sample_id":        rec.get("sample_id", 0),
+                    "question":         rec.get("question", ""),
+                    "prompt":           prompt_text,
+                    "answer_ref":       rec.get("answer_ref", ""),
+                    "dataset":          rec.get("dataset", ""),
+                    "draft_completion": draft,
+                    "raw_completion":   refined,
+                    "model":            model.name,
+                    "gen":              gen_meta,
+                }
+                # Preserve MATH-500 metadata
+                for key in ("subject", "level"):
                     if key in rec:
                         out_rec[key] = rec[key]
+            else:
+                out_rec = {
+                    "task_id":           rec_id,
+                    "benchmark":         benchmark,
+                    "prompt":            prompt_text,
+                    "draft_completion":  draft,
+                    "raw_completion":    refined,
+                    "solution":          solution,
+                    "model":             model.name,
+                    "gen":               gen_meta,
+                }
+                # LiveBench: preserve question_id / meta
+                if is_livebench:
+                    for key in ("question_id", "meta"):
+                        if key in rec:
+                            out_rec[key] = rec[key]
+                if benchmark == "bigcodebench":
+                    for key in ("split", "subset", "revision", "source_prompt"):
+                        if key in rec:
+                            out_rec[key] = rec[key]
+
             fout.write(json.dumps(out_rec, ensure_ascii=False) + "\n")
             fout.flush()
             n_records_written += 1

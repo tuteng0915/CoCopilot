@@ -32,8 +32,9 @@
 
 - [x] HumanEval / MBPP：`*_reflexion_feedback*.jsonl` — **已有结果**
 - [x] HumanEval / MBPP：`*_rerank_logprob_k8*.jsonl` — **已有结果**
-- [ ] Table 3 MBPP：各 AR 模型 + dream remask on MBPP（目前只有 HumanEval）
-- [ ] LiveCodeBench 其他模型（qwen / llama31 / dream）：`n_scored=0`，评测未跑通
+- [x] Table 3 MBPP：qwen/llama31/starcoder2 + dream remask on MBPP — **全部完成**（9 个 pair 全 ✅，见 results.md Table 3）
+- [ ] DeepSeek + LLaDA on MBPP（baseline 表中该行显示 —，尚未跑）
+- [ ] LiveCodeBench 其他模型（qwen / llama31 / dream）：`n_scored=0`，评测未跑通（original_json 字段缺失）
 - [ ] BigCodeBench raw pass@1=0.0 核查（deepseek_pass1_clean 正常，raw 版本异常）
 - [ ] Extended table shards（dream + collab on LCB/BCB）：仍在进行，`run_extended_table.py`
 
@@ -67,9 +68,9 @@
 
 待跑实验：
 
-- [ ] GSM8K：各基础模型 baseline（`--temperature 0`）
-- [ ] MATH-500：各基础模型 baseline，附 `--per_subject --per_level` 细分
-- [ ] 在上述数据集上跑 CoCoder 管线，与 baseline 对比 accuracy + latency
+- [x] GSM8K：DeepSeek/Qwen/Llama-3.1 baseline — **已完成**（DeepSeek 19.0%，Qwen 30.6%，Llama-3.1 84.5%）
+- [x] MATH-500：DeepSeek/Qwen/Llama-3.1 baseline + subject breakdown — **已完成**（DeepSeek 4.6%，Qwen 37.6%，Llama-3.1 38.6%）
+- [ ] 在上述数据集上跑 CoCoder 管线，与 baseline 对比 accuracy + latency（Dream 过慢~217s/题，需另选策略）
 
 评测产物命名约定同代码任务，见 `runbook.md` § 数学任务。
 

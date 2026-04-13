@@ -275,6 +275,7 @@ def main():
                     "id": item["id"],
                     "sample_id": sample_idx,
                     "question": item["question"],
+                    "prompt": prompt,                      # saved for gen_remask pipeline
                     "answer_ref": item["answer"],          # ground-truth answer
                     "raw_completion": raw_gen,
                     "model": model.name,

@@ -147,7 +147,8 @@ _STANDALONE_ENTRIES = [
         "deepseek_mbpp_summary.json",
         "deepseek_livecodebench_pass1_clean_summary.json",
         "deepseek_bigcodebench_instruct_full_pass1_clean_pass_at_k.json",
-        None, None,  # gen_evalplus doesn't record timing
+        "deepseek_humaneval_timed.jsonl.timing_summary.json",
+        "deepseek_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "Qwen2.5-Coder 7B",
@@ -155,7 +156,8 @@ _STANDALONE_ENTRIES = [
         "qwen_mbpp_summary.json",
         "qwen_livecodebench_summary.json",
         "qwen_bigcodebench_instruct_full_pass_at_k.json",
-        None, None,
+        "qwen_humaneval_timed.jsonl.timing_summary.json",
+        "qwen_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "Llama-3.1 8B",
@@ -163,7 +165,8 @@ _STANDALONE_ENTRIES = [
         "llama31_mbpp_summary.json",
         "llama31_livecodebench_summary.json",
         "llama31_bigcodebench_instruct_full_pass_at_k.json",
-        None, None,
+        "llama31_humaneval_timed.jsonl.timing_summary.json",
+        "llama31_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "Mistral 7B",
@@ -171,7 +174,8 @@ _STANDALONE_ENTRIES = [
         "mistral_mbpp_summary.json",
         "mistral_livecodebench_summary.json",
         None,
-        None, None,
+        "mistral_humaneval_timed.jsonl.timing_summary.json",
+        "mistral_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "StarCoder2 7B",
@@ -179,7 +183,8 @@ _STANDALONE_ENTRIES = [
         "starcoder2_mbpp_summary.json",
         "starcoder2_livecodebench_summary.json",
         None,
-        None, None,
+        "starcoder2_humaneval_timed.jsonl.timing_summary.json",
+        "starcoder2_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "Dream-Coder 7B",
@@ -187,7 +192,8 @@ _STANDALONE_ENTRIES = [
         "dream_mbpp_summary.json",
         "dream_livecodebench_summary.json",
         None,
-        None, None,
+        "dream_humaneval_timed.jsonl.timing_summary.json",
+        "dream_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "LLaDA 8B",
@@ -195,7 +201,8 @@ _STANDALONE_ENTRIES = [
         "llada_mbpp_summary.json",
         "llada_livecodebench_summary.json",
         None,
-        None, None,
+        "llada_humaneval_timed.jsonl.timing_summary.json",
+        "llada_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "Seed-Coder 8B",
@@ -203,7 +210,8 @@ _STANDALONE_ENTRIES = [
         "seed-coder_mbpp_summary.json",
         "seed-coder_livecodebench_summary.json",
         None,
-        None, None,
+        "seed-coder_humaneval_timed.jsonl.timing_summary.json",
+        "seed-coder_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "Seed-DiffCoder 8B",
@@ -211,7 +219,8 @@ _STANDALONE_ENTRIES = [
         "seed-diffcoder_mbpp_summary.json",
         "seed-diffcoder_livecodebench_summary.json",
         None,
-        None, None,
+        "seed-diffcoder_humaneval_timed.jsonl.timing_summary.json",
+        "seed-diffcoder_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "DiffuLLaMA 7B",
@@ -231,7 +240,6 @@ def section_standalone(out: list[str]) -> None:
         "模型",
         "HE+ plus%", "HE+ base%",
         "MBPP+ plus%", "MBPP+ base%",
-        "LCB acc%", "BCB pass@1%",
         "s/sample (HE)", "s/sample (MBPP)",
     ]
     out.append(_fmt_row(*headers))
@@ -243,26 +251,6 @@ def section_standalone(out: list[str]) -> None:
         n_he = he["n_tasks"] if he else None
         n_mb = mb["n_tasks"] if mb else None
 
-        # LCB
-        lcb = _load_livecodebench(lcb_f) if lcb_f else None
-        if lcb and lcb["ok"]:
-            lcb_str = f"{lcb['accuracy']*100:.1f}%"
-        elif lcb:
-            lcb_str = "❌"
-        else:
-            lcb_str = "—"
-
-        # BCB
-        bcb = _load_bigcodebench(bcb_f) if bcb_f else None
-        if bcb and bcb["pass1"] is not None:
-            p1 = bcb["pass1"]
-            p1_str = f"{p1*100:.1f}%" if p1 < 1.0 else f"{p1:.1f}%"
-            if p1 == 0.0:
-                p1_str += "⚠️"
-        else:
-            p1_str = "—"
-
-        # Timing
         t_he = _load_timing(OUTPUTS / t_he_f if t_he_f else None, n_he)
         t_mb = _load_timing(OUTPUTS / t_mb_f if t_mb_f else None, n_mb)
 
@@ -272,12 +260,9 @@ def section_standalone(out: list[str]) -> None:
             _pct(he["base_pct"] if he else None),
             _pct(mb["plus_pct"] if mb else None),
             _pct(mb["base_pct"] if mb else None),
-            lcb_str, p1_str,
             _sps(t_he), _sps(t_mb),
         ))
     out.append("")
-    out.append("> ⚠️ BCB 带 ⚠️ 标记的结果为 0.0%，原始评测结果可疑（疑似交互提示卡住），pass1_clean 版本正常。\n")
-    out.append("> LCB ❌ = n_scored=0，评测未跑通（original_json 字段问题），仅 DeepSeek 有可信结果。\n")
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +299,8 @@ def section_table3_model_pairs(out: list[str]) -> None:
             OUTPUTS / "llama31_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
         "qwen_dream_mbpp_t0.9":
             OUTPUTS / "qwen_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "starcoder2_dream_mbpp_t0.9":
+            OUTPUTS / "starcoder2_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
     }
     _PAIR_EXPECTED_N = {
         "humaneval": 164,
@@ -394,7 +381,8 @@ _BASELINE_ENTRIES = [
         "+ Rerank logprob k=8",
         "deepseek_humaneval_rerank_logprob_k8_summary.json",
         "deepseek_mbpp_rerank_logprob_k8_summary.json",
-        None, None,
+        "deepseek_humaneval_rerank_logprob_k8_timed.jsonl.timing_summary.json",
+        "deepseek_mbpp_rerank_logprob_k8_timed.jsonl.timing_summary.json",
     ),
     (
         "+ Locate-AR-Rewrite",
@@ -406,16 +394,16 @@ _BASELINE_ENTRIES = [
     (
         "+ LLaDA remask τ=0.9",
         "deepseek_llada_remask_humaneval_t0.9_summary.json",
-        None,
+        "deepseek_llada_remask_mbpp_t0.9_summary.json",
         "deepseek_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
-        None,
+        "deepseek_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
     ),
     (
         "+ Dream remask τ=0.9 (ours)",
         "remask_kodai/remask_humaneval_t0.9_summary.json",
         "remask_kodai/remask_mbpp_t0.9_summary.json",
-        None,  # remask_kodai doesn't have timing files
-        None,
+        "deepseek_dream_remask_humaneval_t0.9_timed.jsonl.timing_summary.json",
+        "deepseek_dream_remask_mbpp_t0.9_timed.jsonl.timing_summary.json",
     ),
 ]
 
@@ -449,7 +437,205 @@ def section_table4_baselines(out: list[str]) -> None:
             _sps(t_he), _sps(t_mb),
         ))
     out.append("")
-    out.append("> s/sample = 方法总耗时 / 题目数。baseline（gen_evalplus）尚未统计 timing，显示为 —。\n")
+    out.append("> s/sample = 方法总耗时 / 题目数。baseline timing 来自 `_timed` 重跑产物。\n")
+
+
+# ---------------------------------------------------------------------------
+# Section: Table 4b — Qwen2.5-Coder 7B Baselines
+# ---------------------------------------------------------------------------
+
+# (label, he_summary, mbpp_summary, he_timing_file, mbpp_timing_file)
+_QWEN_BASELINE_ENTRIES = [
+    (
+        "Qwen baseline",
+        "qwen_humaneval_summary.json",
+        "qwen_mbpp_summary.json",
+        "qwen_humaneval_timed.jsonl.timing_summary.json",
+        "qwen_mbpp_timed.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Self-Refine",
+        "qwen_humaneval_selfrefine_r1_summary.json",
+        "qwen_mbpp_selfrefine_r1_summary.json",
+        "qwen_humaneval_selfrefine_r1.jsonl.timing_summary.json",
+        "qwen_mbpp_selfrefine_r1.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Reflexion (w/ feedback)",
+        "qwen_humaneval_reflexion_feedback_r1_summary.json",
+        "qwen_mbpp_reflexion_feedback_r1_summary.json",
+        "qwen_humaneval_reflexion_feedback_r1.jsonl.timing_summary.json",
+        "qwen_mbpp_reflexion_feedback_r1.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Rerank logprob k=8",
+        "qwen_humaneval_rerank_logprob_k8_summary.json",
+        "qwen_mbpp_rerank_logprob_k8_summary.json",
+        "qwen_humaneval_rerank_logprob_k8.jsonl.timing_summary.json",
+        "qwen_mbpp_rerank_logprob_k8.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Locate-AR-Rewrite",
+        "qwen_humaneval_locate_ar_rewrite_t0.9_summary.json",
+        "qwen_mbpp_locate_ar_rewrite_t0.9_summary.json",
+        "qwen_humaneval_locate_ar_rewrite_t0.9.jsonl.timing_summary.json",
+        "qwen_mbpp_locate_ar_rewrite_t0.9.jsonl.timing_summary.json",
+    ),
+    (
+        "+ LLaDA remask τ=0.9",
+        "qwen_llada_remask_humaneval_t0.9_summary.json",
+        "qwen_llada_remask_mbpp_t0.9_summary.json",
+        "qwen_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "qwen_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Dream remask τ=0.9 (ours)",
+        "qwen_dream_remask_humaneval_t0.9_summary.json",
+        "qwen_dream_remask_mbpp_t0.9_summary.json",
+        "qwen_dream_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "qwen_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+    ),
+]
+
+
+def section_table4_qwen_baselines(out: list[str]) -> None:
+    out.append("## Table 4b — Qwen2.5-Coder 7B Baselines（pass@1 plus%）\n")
+    headers = [
+        "方法",
+        "HE+ plus%", "HE+ base%",
+        "MBPP+ plus%", "MBPP+ base%",
+        "s/sample (HE)", "s/sample (MBPP)",
+    ]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    for (label, he_f, mbpp_f, t_he_f, t_mb_f) in _QWEN_BASELINE_ENTRIES:
+        he = _load_evalplus_summary(OUTPUTS / he_f if he_f else None)
+        mb = _load_evalplus_summary(OUTPUTS / mbpp_f if mbpp_f else None)
+        n_he = he["n_tasks"] if he else None
+        n_mb = mb["n_tasks"] if mb else None
+
+        t_he = _load_timing(OUTPUTS / t_he_f if t_he_f else None, n_he)
+        t_mb = _load_timing(OUTPUTS / t_mb_f if t_mb_f else None, n_mb)
+
+        out.append(_fmt_row(
+            label,
+            _pct(he["plus_pct"] if he else None),
+            _pct(he["base_pct"] if he else None),
+            _pct(mb["plus_pct"] if mb else None),
+            _pct(mb["base_pct"] if mb else None),
+            _sps(t_he), _sps(t_mb),
+        ))
+    out.append("")
+    out.append("> s/sample = 方法总耗时 / 题目数。\n")
+
+
+# ---------------------------------------------------------------------------
+# Section: Math Benchmarks (GSM8K + MATH500)
+# ---------------------------------------------------------------------------
+
+def _load_math_summary(path: Path | None) -> dict[str, Any] | None:
+    data = _load_json(path) if path else None
+    if data is None:
+        return None
+    acc = data.get("accuracy")
+    n = data.get("n_problems")
+    t_avg = (data.get("timing") or {}).get("generate_s_avg")
+    return {
+        "n": n,
+        "acc_pct": round(acc * 100, 1) if acc is not None else None,
+        "s_per_sample": round(t_avg, 1) if t_avg is not None else None,
+        "subject_breakdown": data.get("subject_breakdown"),
+    }
+
+
+# (label, gsm8k_summary, math500_summary)  — 仅 AR 模型
+_MATH_ENTRIES = [
+    ("DeepSeek-Coder 6.7B", "deepseek_gsm8k_summary.json", "deepseek_math500_summary.json"),
+    ("Qwen2.5-Coder 7B",    "qwen_gsm8k_summary.json",     "qwen_math500_summary.json"),
+    ("Llama-3.1 8B",        "llama31_gsm8k_summary.json",  "llama31_math500_summary.json"),
+    ("Mistral 7B",          None,                           None),  # 待跑
+    ("StarCoder2 7B",       None,                           None),  # 待跑
+]
+
+_MATH500_SUBJECTS = [
+    "Algebra", "Prealgebra", "Precalculus",
+    "Intermediate Algebra", "Number Theory", "Geometry",
+    "Counting & Probability",
+]
+
+
+def section_math(out: list[str]) -> None:
+    out.append("## Math Benchmarks（AR 模型）\n")
+    headers = ["模型", "GSM8K acc%", "s/sample", "MATH500 acc%", "s/sample"]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    for label, gsm_f, math_f in _MATH_ENTRIES:
+        gsm = _load_math_summary(OUTPUTS / gsm_f if gsm_f else None)
+        math = _load_math_summary(OUTPUTS / math_f if math_f else None)
+        out.append(_fmt_row(
+            label,
+            _pct(gsm["acc_pct"] if gsm else None),
+            _sps(gsm["s_per_sample"] if gsm else None),
+            _pct(math["acc_pct"] if math else None),
+            _sps(math["s_per_sample"] if math else None),
+        ))
+
+    out.append("")
+    out.append("> GSM8K：1319 道小学数学题（test set）。MATH500：500 道竞赛数学题（MATH 数据集子集）。\n")
+    out.append("> 仅列 AR 模型；dLLM（Dream-Coder、LLaDA）不适用于此评测。\n")
+
+    # MATH500 subject breakdown
+    out.append("### MATH500 Subject Breakdown\n")
+    subj_headers = ["模型"] + [s.replace("Counting & Probability", "C&P") for s in _MATH500_SUBJECTS]
+    out.append(_fmt_row(*subj_headers))
+    out.append(_hr(len(subj_headers)))
+
+    for label, _, math_f in _MATH_ENTRIES:
+        math = _load_math_summary(OUTPUTS / math_f if math_f else None)
+        if math is None or not math.get("subject_breakdown"):
+            out.append(_fmt_row(label, *["—"] * len(_MATH500_SUBJECTS)))
+            continue
+        bd = math["subject_breakdown"]
+        cells = [label]
+        for subj in _MATH500_SUBJECTS:
+            s = bd.get(subj)
+            cells.append(f"{s['correct']}/{s['total']} ({s['accuracy']*100:.0f}%)" if s else "—")
+        out.append(_fmt_row(*cells))
+    out.append("")
+
+
+# ---------------------------------------------------------------------------
+# Section: τ Sensitivity（DeepSeek + Dream-Coder, remask_kodai）
+# ---------------------------------------------------------------------------
+
+_TAU_VALUES = ["0.7", "0.8", "0.9", "0.93", "0.95", "0.97", "0.99"]
+
+
+def section_tau_sweep(out: list[str]) -> None:
+    out.append("## τ 敏感性分析（DeepSeek-Coder + Dream-Coder）\n")
+    out.append("> AR baseline：HE+ plus=56.7%，MBPP+ plus=65.1%。\n")
+
+    headers = ["τ", "HE+ plus%", "HE+ base%", "MBPP+ plus%", "MBPP+ base%"]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    for tau in _TAU_VALUES:
+        he_path  = REMASK_KODAI / f"remask_humaneval_t{tau}_summary.json"
+        mb_path  = REMASK_KODAI / f"remask_mbpp_t{tau}_summary.json"
+        he = _load_evalplus_summary(he_path)
+        mb = _load_evalplus_summary(mb_path)
+        out.append(_fmt_row(
+            tau,
+            _pct(he["plus_pct"] if he else None),
+            _pct(he["base_pct"] if he else None),
+            _pct(mb["plus_pct"] if mb else None),
+            _pct(mb["base_pct"] if mb else None),
+        ))
+    out.append("")
+    out.append("> 产物来自 `outputs/remask_kodai/`（DeepSeek 草稿 + Dream-Coder 精炼）。\n")
+    out.append("> 其他 AR 模型 × τ 组合尚未系统扫描。\n")
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +748,9 @@ def main() -> None:
     section_standalone(lines)
     section_table3_model_pairs(lines)
     section_table4_baselines(lines)
+    section_table4_qwen_baselines(lines)
+    section_math(lines)
+    section_tau_sweep(lines)
     section_table2_extended(lines)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
