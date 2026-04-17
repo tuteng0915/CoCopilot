@@ -34,10 +34,22 @@ import re
 import time
 from pathlib import Path
 
+import numpy as np
+import torch
 from tqdm import tqdm
 
-from coder.models import DreamCoder, LLaDACoder
-from coder.utils.code_cleaning import build_prompt_scaffold_solution, clean_model_completion
+from coder.locators import (
+    align_confidence_to_spans,
+    apply_masking_policy,
+    build_locator,
+    get_token_char_spans,
+)
+from coder.models import DreamCoder, LLaDACoder, DreamGeneral
+from coder.utils.code_cleaning import (
+    build_prompt_scaffold_solution,
+    clean_model_completion,
+    indent_as_body,
+)
 from coder.utils.schema import ModelRequest
 from coder.utils.sharding import take_shard, validate_shard_args
 
@@ -45,9 +57,47 @@ from coder.utils.sharding import take_shard, validate_shard_args
 def build_evalplus_solution(prompt_text: str, gen: str) -> str:
     """Build a full EvalPlus-compatible solution string from a prompt + completion."""
     g = clean_model_completion(gen, prompt_text).lstrip()
+    prompt = prompt_text.rstrip()
+
+    def extract_prompt_imports(p: str) -> str:
+        imports = []
+        for line in p.splitlines():
+            s = line.strip()
+            if s.startswith("from ") or s.startswith("import "):
+                imports.append(line.rstrip())
+                continue
+            if s.startswith("def ") or s.startswith("class "):
+                break
+        return "\n".join(imports).strip()
+
+    def infer_target_func_name(p: str) -> str | None:
+        m = re.search(r"(?m)^\s*def\s+([A-Za-z_]\w*)\s*\(", p)
+        return m.group(1) if m else None
+
+    def extract_single_function(src: str, func_name: str) -> str | None:
+        pattern = (
+            rf"(?ms)^(?P<decor>(?:@\w[^\n]*\n)*)"
+            rf"(?P<def>def\s+{re.escape(func_name)}\s*\(.*?)(?=^\s*(?:def|class)\s+|\Z)"
+        )
+        m = re.search(pattern, src)
+        if not m:
+            return None
+        return (m.group("decor") + m.group("def")).strip()
+
     if re.search(r"(?m)^(def|class|import|from)\s+", g):
-        return g.rstrip()
-    return (prompt_text.rstrip() + "\n" + g.lstrip()).rstrip()
+        target_name = infer_target_func_name(prompt)
+        if target_name:
+            extracted = extract_single_function(g, target_name)
+            g2 = extracted if extracted else g.rstrip()
+        else:
+            g2 = g.rstrip()
+
+        imports = extract_prompt_imports(prompt)
+        if imports and imports not in g2:
+            g2 = (imports + "\n\n" + g2).rstrip()
+        return g2.rstrip()
+
+    return (prompt + "\n" + indent_as_body(g.lstrip())).rstrip()
 
 
 def read_jsonl(path: str):
@@ -58,6 +108,29 @@ def read_jsonl(path: str):
                 yield json.loads(line)
 
 
+def aggregate_output_timing(path: Path) -> tuple[int, float, float, float]:
+    n_records = 0
+    remask_total = 0.0
+    pack_total = 0.0
+    for rec in read_jsonl(str(path)):
+        timing = ((rec.get("gen") or {}).get("timing") or {})
+        remask_total += float(timing.get("remask_generate_s") or 0.0)
+        pack_total += float(timing.get("pack_solution_s") or 0.0)
+        n_records += 1
+    return n_records, remask_total + pack_total, remask_total, pack_total
+
+
+def cleanup_lock(lock_f, lock_path: Path) -> None:
+    try:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_f.close()
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def infer_refiner_name(model_id: str) -> str:
     mid = (model_id or "").lower()
     if "llada" in mid:
@@ -65,17 +138,27 @@ def infer_refiner_name(model_id: str) -> str:
     return "dream"
 
 
-def build_refiner(name: str, model_id: str, device: str):
+_DEFAULT_REFINER_MODELS = {
+    "dream": "Dream-org/Dream-Coder-v0-Instruct-7B",
+    "dream_general": "Dream-org/Dream-v0-Instruct-7B",
+    "llada": "GSAI-ML/LLaDA-8B-Instruct",
+}
+
+
+def build_refiner(name: str, model_id: str | None, device: str):
+    resolved_id = model_id or _DEFAULT_REFINER_MODELS.get(name)
     if name == "dream":
-        return DreamCoder(model_id=model_id, device=device)
+        return DreamCoder(model_id=resolved_id, device=device)
+    if name == "dream_general":
+        return DreamGeneral(model_id=resolved_id, device=device)
     if name == "llada":
-        return LLaDACoder(model_id=model_id, device=device)
+        return LLaDACoder(model_id=resolved_id, device=device)
     raise ValueError(f"Unsupported refiner: {name}")
 
 
-def is_math_record(rec: dict) -> bool:
-    """Math records from gen_math.py use 'id' + 'answer_ref' instead of 'task_id'."""
-    return "answer_ref" in rec and "id" in rec and "task_id" not in rec
+def is_id_record(rec: dict) -> bool:
+    """Non-code records use 'id' instead of 'task_id' and should not be code-wrapped."""
+    return "id" in rec and "task_id" not in rec
 
 
 def infer_benchmark(rec: dict, task_id: str) -> str | None:
@@ -91,6 +174,84 @@ def infer_benchmark(rec: dict, task_id: str) -> str | None:
     return None
 
 
+@torch.inference_mode()
+def compute_refiner_mask_plan(
+    model,
+    refiner_name: str,
+    req: ModelRequest,
+    draft: str,
+    confidence_threshold: float | None,
+    mask_ratio: float | None,
+    mask_granularity: str,
+    span_merge_gap: int,
+    external_confidence: torch.Tensor | None,
+) -> tuple[torch.Tensor | None, torch.BoolTensor | None, dict]:
+    """Score the draft once and compute the planned remask positions."""
+    comp_enc = model.tok(draft, return_tensors="pt", add_special_tokens=False)
+    comp_ids = comp_enc.input_ids.to(model.device)
+    n_tokens = int(comp_ids.shape[1])
+    if n_tokens == 0:
+        return external_confidence, None, {
+            "draft_tokens": 0,
+            "mask_tokens": 0,
+            "mask_fraction": 0.0,
+            "confidence_mean": None,
+            "confidence_min": None,
+            "confidence_max": None,
+        }
+
+    if external_confidence is not None:
+        confidence = external_confidence.to(model.device)
+    elif refiner_name in ("dream", "dream_general"):
+        messages = [{"role": "user", "content": req.prompt}]
+        enc = model.tok.apply_chat_template(
+            messages,
+            return_tensors="pt",
+            return_dict=True,
+            add_generation_prompt=True,
+        )
+        prompt_ids = enc.input_ids.to(model.device)
+        confidence = model.score_tokens(prompt_ids, comp_ids)
+    elif refiner_name == "llada":
+        messages = [{"role": "user", "content": req.prompt}]
+        prompt_text = model.tok.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        enc = model.tok(
+            prompt_text,
+            add_special_tokens=False,
+            padding=True,
+            return_tensors="pt",
+        )
+        prompt_ids = enc["input_ids"].to(model.device)
+        attention_mask = enc["attention_mask"].to(model.device)
+        confidence = model.score_tokens(prompt_ids, comp_ids, attention_mask)
+    else:
+        raise ValueError(f"Unsupported refiner for mask planning: {refiner_name}")
+
+    mask_pos = apply_masking_policy(
+        confidence,
+        confidence_threshold,
+        mask_ratio,
+        mask_granularity,
+        span_merge_gap,
+        comp_ids,
+        model.tok,
+    )
+    n_mask = int(mask_pos.sum().item())
+    stats = {
+        "draft_tokens": n_tokens,
+        "mask_tokens": n_mask,
+        "mask_fraction": (float(n_mask) / n_tokens) if n_tokens else 0.0,
+        "confidence_mean": float(confidence.float().mean().item()) if n_tokens else None,
+        "confidence_min": float(confidence.float().min().item()) if n_tokens else None,
+        "confidence_max": float(confidence.float().max().item()) if n_tokens else None,
+    }
+    return confidence, mask_pos, stats
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Refine AR drafts with a diffusion refiner via confidence-based remasking."
@@ -99,11 +260,38 @@ def main() -> None:
                     help="Input JSONL file from AR model generation.")
     ap.add_argument("--out", required=True,
                     help="Output JSONL path for refined samples.")
-    ap.add_argument("--refiner", choices=["dream", "llada"], default=None,
+    ap.add_argument("--refiner", choices=["dream", "dream_general", "llada"], default=None,
                     help="Refiner family. Default: infer from --model_id.")
-    ap.add_argument("--model_id", default="Dream-org/Dream-Coder-v0-Instruct-7B",
-                    help="Refiner HuggingFace model ID.")
+    ap.add_argument("--model_id", default=None,
+                    help="Refiner HuggingFace model ID. "
+                         "Defaults to Dream-org/Dream-Coder-v0-Instruct-7B for dream, "
+                         "GSAI-ML/LLaDA-8B-Instruct for llada.")
     ap.add_argument("--device", default="cuda")
+
+    # Locator — which model decides which tokens to remask
+    ap.add_argument(
+        "--locator",
+        choices=["dream", "ar", "bert"],
+        default="dream",
+        help=(
+            "Model used to score draft tokens and decide what to remask.\n"
+            "  dream (default): the refiner itself scores via a single forward pass\n"
+            "                   (original CoCoder behaviour).\n"
+            "  ar:              an AR model's teacher-forced log-probabilities\n"
+            "                   (causal, left-context only).\n"
+            "  bert:            CodeBERT single-pass MLM confidence\n"
+            "                   (bidirectional, lightweight)."
+        ),
+    )
+    ap.add_argument(
+        "--locator_model_id",
+        default=None,
+        help=(
+            "HuggingFace model ID for the locator when --locator is 'ar' or 'bert'.\n"
+            "Defaults: ar → deepseek-ai/deepseek-coder-6.7b-instruct,\n"
+            "          bert → microsoft/codebert-base-mlm."
+        ),
+    )
 
     # Masking policy (use exactly one)
     ap.add_argument("--confidence_threshold", type=float, default=None,
@@ -121,6 +309,29 @@ def main() -> None:
         type=int,
         default=0,
         help="For --mask_granularity span: also mask gaps of <= this many tokens between masked tokens.",
+    )
+    ap.add_argument(
+        "--gate_min_mask_fraction",
+        type=float,
+        default=None,
+        help=(
+            "Skip refinement when the planned mask fraction is below this value. "
+            "Uses only pre-refinement locator scores."
+        ),
+    )
+    ap.add_argument(
+        "--gate_max_mask_fraction",
+        type=float,
+        default=None,
+        help=(
+            "Skip refinement when the planned mask fraction is above this value. "
+            "Uses only pre-refinement locator scores."
+        ),
+    )
+    ap.add_argument(
+        "--record_mask_stats",
+        action="store_true",
+        help="Record planned mask counts, mask fraction, and confidence stats in gen metadata.",
     )
 
     # Diffusion generation params for the refinement step
@@ -141,12 +352,30 @@ def main() -> None:
         args.confidence_threshold = 0.5
     if args.confidence_threshold is not None and args.mask_ratio is not None:
         ap.error("Specify at most one of --confidence_threshold and --mask_ratio.")
+    if args.gate_min_mask_fraction is not None and args.gate_min_mask_fraction < 0:
+        ap.error("--gate_min_mask_fraction must be >= 0.")
+    if args.gate_max_mask_fraction is not None and args.gate_max_mask_fraction < 0:
+        ap.error("--gate_max_mask_fraction must be >= 0.")
+    if (
+        args.gate_min_mask_fraction is not None
+        and args.gate_max_mask_fraction is not None
+        and args.gate_min_mask_fraction > args.gate_max_mask_fraction
+    ):
+        ap.error("--gate_min_mask_fraction must be <= --gate_max_mask_fraction.")
     try:
         validate_shard_args(num_shards=args.num_shards, shard_idx=args.shard_idx)
     except ValueError as e:
         ap.error(str(e))
 
-    refiner_name = args.refiner or infer_refiner_name(args.model_id)
+    refiner_name = args.refiner or infer_refiner_name(args.model_id or "")
+    # Resolve default model_id per refiner type
+    if args.model_id is None:
+        _DEFAULT_MODEL_IDS = {
+            "dream": "Dream-org/Dream-Coder-v0-Instruct-7B",
+            "dream_general": "Dream-org/Dream-v0-Instruct-7B",
+            "llada": "GSAI-ML/LLaDA-8B-Instruct",
+        }
+        args.model_id = _DEFAULT_MODEL_IDS.get(refiner_name, "Dream-org/Dream-Coder-v0-Instruct-7B")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,10 +419,23 @@ def main() -> None:
         )
         print(f"[timing] wrote {out_path}.timing_summary.json")
         print(f"[done] no records selected for shard {args.shard_idx}/{args.num_shards}")
+        cleanup_lock(lock_f, lock_path)
         return
 
     # Load refiner once
     model = build_refiner(refiner_name, args.model_id, args.device)
+
+    # Load locator (None means the refiner scores itself — original behaviour)
+    locator = build_locator(
+        name=args.locator,
+        model_id=args.locator_model_id,
+        device=args.device,
+    )
+    if locator is not None:
+        args.locator_model_id = getattr(locator, "model_id", args.locator_model_id)
+        print(f"[locator] using external locator: {args.locator} ({args.locator_model_id})")
+    else:
+        print(f"[locator] using {refiner_name} refiner as locator")
 
     t_total0 = time.perf_counter()
     timing_remask_s: list[float] = []
@@ -202,8 +444,8 @@ def main() -> None:
 
     with out_path.open("a", encoding="utf-8") as fout:
         for rec in tqdm(records, desc="remask"):
-            math_mode = is_math_record(rec)
-            rec_id: str = rec.get("id") if math_mode else rec.get("task_id", "")
+            id_mode = is_id_record(rec)
+            rec_id: str = rec.get("id") if id_mode else rec.get("task_id", "")
             if rec_id in done_ids:
                 continue
 
@@ -215,7 +457,7 @@ def main() -> None:
                 or ""
             )
 
-            if not math_mode:
+            if not id_mode:
                 draft = clean_model_completion(draft, prompt_text)
 
             req = ModelRequest(
@@ -228,24 +470,80 @@ def main() -> None:
 
             try:
                 t0 = time.perf_counter()
-                refined = model.generate_with_remask(
-                    req=req,
-                    draft=draft,
-                    confidence_threshold=args.confidence_threshold,
-                    mask_ratio=args.mask_ratio,
-                    mask_granularity=args.mask_granularity,
-                    span_merge_gap=args.span_merge_gap,
+                mask_stats: dict = {}
+                skip_refine = False
+                skip_reason: str | None = None
+
+                # Compute external confidence when a non-dream locator is used.
+                ext_conf: torch.Tensor | None = None
+                if locator is not None and draft:
+                    loc_conf, loc_spans = locator.score(prompt_text, draft)
+                    if len(loc_conf) > 0:
+                        # Align locator scores to the refiner's token space.
+                        refiner_spans = get_token_char_spans(model.tok, draft)
+                        aligned = align_confidence_to_spans(
+                            loc_conf, loc_spans, refiner_spans,
+                        )
+                        ext_conf = torch.tensor(
+                            aligned, dtype=torch.float32, device=args.device,
+                        )
+
+                should_plan_masks = (
+                    args.record_mask_stats
+                    or args.gate_min_mask_fraction is not None
+                    or args.gate_max_mask_fraction is not None
                 )
+                if should_plan_masks and draft:
+                    ext_conf, _mask_pos, mask_stats = compute_refiner_mask_plan(
+                        model=model,
+                        refiner_name=refiner_name,
+                        req=req,
+                        draft=draft,
+                        confidence_threshold=args.confidence_threshold,
+                        mask_ratio=args.mask_ratio,
+                        mask_granularity=args.mask_granularity,
+                        span_merge_gap=args.span_merge_gap,
+                        external_confidence=ext_conf,
+                    )
+                    mask_fraction = float(mask_stats.get("mask_fraction") or 0.0)
+                    if (
+                        args.gate_min_mask_fraction is not None
+                        and mask_fraction < args.gate_min_mask_fraction
+                    ):
+                        skip_refine = True
+                        skip_reason = "mask_fraction_below_min"
+                    if (
+                        args.gate_max_mask_fraction is not None
+                        and mask_fraction > args.gate_max_mask_fraction
+                    ):
+                        skip_refine = True
+                        skip_reason = "mask_fraction_above_max"
+
+                if skip_refine:
+                    refined = draft
+                else:
+                    refined = model.generate_with_remask(
+                        req=req,
+                        draft=draft,
+                        confidence_threshold=args.confidence_threshold,
+                        mask_ratio=args.mask_ratio,
+                        mask_granularity=args.mask_granularity,
+                        span_merge_gap=args.span_merge_gap,
+                        external_confidence=ext_conf,
+                    )
                 t1 = time.perf_counter()
             except Exception as e:
                 print(f"[warn] {rec_id}: generate_with_remask failed ({e}); keeping draft.")
                 refined = draft
                 t1 = time.perf_counter()
                 t0 = t1
+                mask_stats = {}
+                skip_refine = True
+                skip_reason = "generate_with_remask_failed"
 
             t_pack0 = time.perf_counter()
-            if math_mode:
-                # Math: no code solution wrapping needed; eval_math.py reads raw_completion directly.
+            if id_mode:
+                # Math/research/writing: no code solution wrapping; evaluators read raw_completion.
                 pass
             else:
                 benchmark = infer_benchmark(rec, rec_id) or "evalplus"
@@ -255,6 +553,8 @@ def main() -> None:
                     solution = refined
                 elif benchmark == "bigcodebench":
                     solution = build_prompt_scaffold_solution(prompt_text, refined)
+                elif skip_refine and rec.get("solution"):
+                    solution = rec["solution"]
                 else:
                     solution = build_evalplus_solution(prompt_text, refined)
             t_pack1 = time.perf_counter()
@@ -265,10 +565,16 @@ def main() -> None:
             gen_meta = {
                 "source_model":         rec.get("model", "unknown"),
                 "refiner":              refiner_name,
+                "locator":              args.locator,
+                "locator_model_id":     args.locator_model_id,
                 "confidence_threshold": args.confidence_threshold,
                 "mask_ratio":           args.mask_ratio,
                 "mask_granularity":     args.mask_granularity,
                 "span_merge_gap":       args.span_merge_gap,
+                "gate_min_mask_fraction": args.gate_min_mask_fraction,
+                "gate_max_mask_fraction": args.gate_max_mask_fraction,
+                "skip_refine":          skip_refine,
+                "skip_reason":          skip_reason,
                 "temperature":          args.temperature,
                 "top_p":                args.top_p,
                 "seed":                 args.seed,
@@ -278,24 +584,20 @@ def main() -> None:
                     "total_s":           (t1 - t0) + (t_pack1 - t_pack0),
                 },
             }
+            if args.record_mask_stats or mask_stats:
+                gen_meta.update(mask_stats)
 
-            if math_mode:
-                out_rec = {
+            if id_mode:
+                out_rec = dict(rec)
+                out_rec.update({
                     "id":               rec_id,
                     "sample_id":        rec.get("sample_id", 0),
-                    "question":         rec.get("question", ""),
                     "prompt":           prompt_text,
-                    "answer_ref":       rec.get("answer_ref", ""),
-                    "dataset":          rec.get("dataset", ""),
                     "draft_completion": draft,
                     "raw_completion":   refined,
                     "model":            model.name,
                     "gen":              gen_meta,
-                }
-                # Preserve MATH-500 metadata
-                for key in ("subject", "level"):
-                    if key in rec:
-                        out_rec[key] = rec[key]
+                })
             else:
                 out_rec = {
                     "task_id":           rec_id,
@@ -322,6 +624,16 @@ def main() -> None:
             n_records_written += 1
 
     t_total1 = time.perf_counter()
+    summary_n_records = n_records_written
+    summary_total_s = t_total1 - t_total0
+    summary_remask_s = float(sum(timing_remask_s))
+    summary_pack_s = float(sum(timing_pack_s))
+    if args.resume:
+        try:
+            summary_n_records, summary_total_s, summary_remask_s, summary_pack_s = aggregate_output_timing(out_path)
+        except Exception as e:
+            print(f"[warn] failed to aggregate resumed output timing ({e}); using this-run timing only.")
+
     timing_path = str(out_path) + ".timing_summary.json"
     summary = {
         "script": "gen_remask",
@@ -330,12 +642,12 @@ def main() -> None:
         "refiner": refiner_name,
         "num_shards": args.num_shards,
         "shard_idx": args.shard_idx,
-        "n_records_written": n_records_written,
+        "n_records_written": summary_n_records,
         "timing": {
-            "total_s": t_total1 - t_total0,
-            "remask_generate_s_total": float(sum(timing_remask_s)),
-            "pack_solution_s_total": float(sum(timing_pack_s)),
-            "remask_generate_s_avg": (float(sum(timing_remask_s)) / len(timing_remask_s)) if timing_remask_s else None,
+            "total_s": summary_total_s,
+            "remask_generate_s_total": summary_remask_s,
+            "pack_solution_s_total": summary_pack_s,
+            "remask_generate_s_avg": (summary_remask_s / summary_n_records) if summary_n_records else None,
         },
     }
     out_path.with_suffix(out_path.suffix + ".timing_summary.json").write_text(
@@ -345,6 +657,7 @@ def main() -> None:
     print(f"[timing] wrote {timing_path}")
 
     print(f"[done] wrote {args.out}")
+    cleanup_lock(lock_f, lock_path)
 
 
 if __name__ == "__main__":

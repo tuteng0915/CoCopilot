@@ -21,6 +21,7 @@ from coder.models import (
     StarCoder2Coder,
     MistralCoder,
     Llama31Coder,
+    CodeLlamaCoder,
     DiffuLLaMACoder,
     SeedDiffCoder,
     SeedCoder,
@@ -68,6 +69,11 @@ def build_model(name: str, device: str, model_id: str | None) -> CoderModel:
     if name == "llama31":
         return Llama31Coder(
             model_id=model_id or "meta-llama/Llama-3.1-8B-Instruct",
+            device=device,
+        )
+    if name == "codellama":
+        return CodeLlamaCoder(
+            model_id=model_id or "codellama/CodeLlama-7b-Instruct-hf",
             device=device,
         )
     if name == "diffullama":
@@ -217,6 +223,7 @@ def main():
             "starcoder2",
             "mistral",
             "llama31",
+            "codellama",
             "diffullama",
             "seed-diffcoder",
             "seed-coder",

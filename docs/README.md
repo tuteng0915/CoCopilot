@@ -1,49 +1,73 @@
-# CoCoder 运行手册（精简版）
+# CoCoder Runbook (Condensed)
 
-这份 `docs/` 用来把”容易忘/容易踩坑”的运行上下文显式化，避免只靠聊天记忆导致重复试错。
+This `docs/` directory makes the "easy-to-forget / easy-to-trip-over" operational context explicit, avoiding repeated trial-and-error from relying solely on chat memory.
 
-## 你最常用的入口
+## Method Framework: Three-Role Decomposition
 
-### 代码任务
+CoCoder consists of three independently replaceable roles:
 
-- EvalPlus（HumanEval/MBPP）：
-  - 生成：`python -m coder.scripts.gen_evalplus`
-  - sanitize：`python -m coder.scripts.postprocess_evalplus`
-  - 评测：`python -m coder.scripts.eval_evalplus`
-- LiveCodeBench / LiveBench-Coding（注意脚本名历史遗留）：
-  - 生成：`python -m coder.scripts.gen_livebench --benchmark livecodebench|livebench-coding`
-  - 评测：`python -m coder.scripts.eval_livebench --benchmark livecodebench|livebench-coding`
-- BigCodeBench：
-  - 生成：`python -m coder.scripts.gen_bigcodebench`
-  - 评测包装：`python -m coder.scripts.eval_bigcodebench`
+```
+AR drafter  ──►  Locator  ──►  dLLM rewriter
+ generates draft   scores tokens, marks low-confidence   rewrites masked positions (diffusion)
+```
 
-### 数学任务（泛化性验证）
+**Default configuration**: Locator and Rewriter share the same dLLM (Dream-Coder / LLaDA).
+The dLLM first performs a single forward pass on the draft, taking `P(token | full sequence)` as confidence (Locator), then performs diffusion rewriting on low-confidence tokens (Rewriter).
 
-为考察方案在代码之外的泛化能力，我们同时在数学推理任务上进行测试：
+All three roles can be replaced independently, corresponding to ablation experiments:
 
-- GSM8K / MATH-500：
-  - 生成：`python -m coder.scripts.gen_math --dataset gsm8k|math500`
-  - 评测：`python -m coder.scripts.eval_math --samples <out.jsonl>`
+| Role | Default | Can be replaced with | Ablation meaning |
+|------|---------|---------------------|-----------------|
+| Drafter | DeepSeek-Coder | Qwen / Llama / StarCoder2 | Effect of draft quality (Table 3) |
+| Locator | dLLM (bidirectional) | AR logprob (unidirectional) / BERT (bidirectional lightweight) | Is bidirectional attention / scale necessary? |
+| Rewriter | Dream-Coder | LLaDA | Effect of diffusion model choice (Table 3) |
 
-## 活跃文档（需要关注）
+Detailed ablation design: `docs/ablation_ideas.md`; completed Locator ablation spec: `docs/specs/done/spec_locator_ablation.md`.
 
-- `docs/runbook.md`：环境、命令模板、产物命名约定
-- `docs/tmux.md`：如何稳定挂长任务（以及为什么”迁移”只能重启）
-- `docs/pitfalls.md`：已知坑位与对策（覆盖提示、字段缺失等）
-- `docs/ablation_ideas.md`：消融实验与小实验想法（含 mask 粒度与 AR logprob 方向）
-- `docs/completion-checklist.md`：判定某组实验是否跑完且可信
-- `docs/experiments-tracker.md`：NeurIPS 2026 投稿前待跑实验汇总（待填论文表 + 附录分析）
-- `docs/results.md`：**所有已跑实验的结果汇总表**（自动生成，更新命令：`python -m coder.scripts.gen_results_table`）
+---
 
-## 已归档文档（实现已完成，不再需要主动维护）
+## Most Common Entry Points
 
-存放在 `docs/done/`：
+### Code Tasks
 
-- `docs/done/reflexion_evalplus_feedback.md`：EvalPlus 真实失败反馈 Reflexion 的实现说明
-- `docs/done/impl_progress_2026-03.md`：2026-03-30 session 完成的实现进展
+- EvalPlus (HumanEval/MBPP):
+  - Generate: `python -m coder.scripts.gen_evalplus`
+  - Sanitize: `python -m coder.scripts.postprocess_evalplus`
+  - Evaluate: `python -m coder.scripts.eval_evalplus`
+- LiveCodeBench / LiveBench-Coding (note legacy script naming):
+  - Generate: `python -m coder.scripts.gen_livebench --benchmark livecodebench|livebench-coding`
+  - Evaluate: `python -m coder.scripts.eval_livebench --benchmark livecodebench|livebench-coding`
+- BigCodeBench:
+  - Generate: `python -m coder.scripts.gen_bigcodebench`
+  - Evaluate wrapper: `python -m coder.scripts.eval_bigcodebench`
 
-以下文件保留为历史参考，已有重定向说明：
+### Math Tasks (Generalization Verification)
 
-- `docs/TODO_reflexion_evalplus_feedback.md` → 见 `done/reflexion_evalplus_feedback.md`
-- `docs/rebuttal-experiments-tracker.md` → 见 `experiments-tracker.md`
+To examine generalization beyond code, we also test on math reasoning tasks:
 
+- GSM8K / MATH-500:
+  - Generate: `python -m coder.scripts.gen_math --dataset gsm8k|math500`
+  - Evaluate: `python -m coder.scripts.eval_math --samples <out.jsonl>`
+
+## Active Documents (Keep in Mind)
+
+- `docs/runbook.md`: environment, command templates, artifact naming conventions
+- `docs/tmux.md`: how to reliably run long tasks (and why "migration" requires restart)
+- `docs/pitfalls.md`: known pitfalls and fixes (overwrite prompts, missing fields, etc.)
+- `docs/ablation_ideas.md`: ablation experiment design (three-role framework, Locator model replacement, granularity, Reflexion, etc.)
+- `docs/completion-checklist.md`: criteria for determining whether an experiment run is complete and trustworthy
+- `docs/experiments-tracker.md`: pre-NeurIPS 2026 experiment summary (pending paper tables + appendix analysis)
+- `docs/specs/`: short-term experiment execution specs and completion records (e.g., Table 3 timing, Group D/E)
+- `docs/results.md`: **summary table of all completed experiments** (auto-generated; update with: `python -m coder.scripts.gen_results_table`)
+
+## Archived Documents (Implementation Complete, No Longer Actively Maintained)
+
+Stored in `docs/done/`:
+
+- `docs/done/reflexion_evalplus_feedback.md`: implementation notes for EvalPlus real failure feedback Reflexion
+- `docs/done/impl_progress_2026-03.md`: implementation progress from the 2026-03-30 session
+
+The following files are kept as historical references with redirect notes:
+
+- `docs/TODO_reflexion_evalplus_feedback.md` → see `done/reflexion_evalplus_feedback.md`
+- `docs/rebuttal-experiments-tracker.md` → see `experiments-tracker.md`

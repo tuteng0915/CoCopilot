@@ -1,128 +1,180 @@
-# 消融实验与小实验想法（CoCoder）
+# Ablation Experiments and Mini-Study Ideas (CoCoder)
 
-这份文档记录“容易做、能出结论”的 ablation / model study 点子，避免只停留在口头讨论。
+This document records "easy to run, conclusive" ablation / model study ideas to prevent them from remaining only in verbal discussion.
 
-## A. Mask 粒度（已实现）
+---
 
-目标：验证“定位/重写”的粒度对最终通过率与稳定性的影响。
+## Framework: Three-Role Decomposition
 
-### A1. Diffusion remask（DreamCoder）
+CoCoder's core pipeline consists of three independently replaceable roles:
 
-脚本：`python -m coder.scripts.gen_remask`
+```
+AR drafter  ──►  Locator  ──►  dLLM rewriter
+ generates draft   scores draft, marks low-confidence tokens   rewrites masked positions (diffusion)
+```
 
-参数：
+- **Drafter**: AR model (DeepSeek-Coder, Qwen2.5-Coder, etc.) generates the initial code draft
+- **Locator**: scores each token in the draft for confidence; low-scoring tokens are masked
+- **Rewriter**: dLLM (Dream-Coder, LLaDA) diffusion-regenerates masked positions
 
-- `--mask_granularity {token,span,line}`
-- `--span_merge_gap K`（仅 span）
+**Default configuration**: Locator and Rewriter share the same dLLM. The dLLM first performs a single forward pass on the draft to score it (acting as Locator), then performs diffusion rewriting on low-confidence tokens (acting as Rewriter). These two sub-steps are already decoupled in the code (`coder/locators/`) and can be freely replaced.
 
-解释：
+Overview of ablation dimensions per role:
 
-- **token**：只 mask 低置信 token（最细粒度，默认旧行为）
-- **span**：把相邻/近邻的 mask 合并成较连续的片段（减少碎片化重写）
-- **line**：只要某行命中低置信 token，就 mask 整行（更偏“结构化编辑”）
+| Role | Ablation Dimension | Core Question | Section |
+|------|-------------------|---------------|---------|
+| **Locator** | Granularity: token / span / line | Fragmented mask vs. structured mask | §A |
+| **Locator** | Model: dLLM / AR / BERT | Is bidirectional perception necessary? Is a lightweight model sufficient? | §B |
+| **Rewriter** | Model: Dream-Coder / LLaDA | Effect of diffusion model choice | Table 3 (done) |
+| **Drafter** | Model: DeepSeek / Qwen / Llama / StarCoder2 | Effect of AR draft quality | Table 3 (done) |
 
-建议 sweep：
+---
 
-- `mask_granularity ∈ {token, span, line}`
-- `span_merge_gap ∈ {0, 1, 2, 4}`
-- 在对齐 “masked token 数量/比例” 的前提下比较（否则不公平）
+## A. Locator Granularity (Implemented)
 
-### A2. Locator→AR targeted rewrite（已实现）
+**Core question**: After the Locator scores the draft, how are the mask "boundaries" determined?
 
-脚本：`python -m coder.scripts.gen_locate_ar_rewrite`
+Script: `python -m coder.scripts.gen_remask`, parameters: `--mask_granularity {token,span,line}`
 
-参数：
+| Granularity | Behavior | Use Case |
+|-------------|----------|---------|
+| `token` | Mask only low-confidence tokens (default, finest granularity) | Point errors (single variable name, operator) |
+| `span` | Merge adjacent low-confidence tokens into contiguous spans (`--span_merge_gap K`) | Reduce fragmentation; suitable for local logic errors |
+| `line` | If any token on a line is low-confidence, mask the entire line | Closer to "structured editing"; suitable for indentation/block-level errors |
+| `step` | Find the least-confident step, **truncate** from that step, let Rewriter take over continuation | CoT/math reasoning: ensures causal consistency of subsequent steps; Rewriter can be AR or dLLM |
 
-- `--mask_granularity {token,span,line}`（默认 `span`）
-- `--span_merge_gap K`
-- `--confidence_threshold` 或 `--mask_ratio`（二选一）
+The `step` granularity is at the same abstraction level as the other three (all are "how to determine mask boundaries"), but semantically shifts from "fill holes" to "continue writing" — especially suited for chain-of-thought scenarios, since each CoT step depends on the previous result and parallel denoising cannot guarantee numerical consistency between steps.
 
-注意：这个 baseline 不是硬约束编辑（AR 可能会改动未 mask 部分），但通过 prompt 强约束“尽量保持不变”可以当作合理 ablation。
+Recommended sweep: `{token, span, line}` × `span_merge_gap ∈ {0, 1, 2, 4}`, comparing under aligned masked token ratios (otherwise unfair). `step` granularity evaluated separately (truncation position selection strategy can be ablated independently).
 
-## B. AR token logprob（已实现基础版）
+### A2. dLLM-locate + AR-rewrite (Implemented)
 
-动机：启发式 `score_candidate()` 可用但较粗糙；使用 **AR 自己对候选的对数似然** 能提供更可解释的 rerank 分数。
+Script: `python -m coder.scripts.gen_locate_ar_rewrite`
 
-当前实现：
+Use dLLM as Locator, use AR model as Rewriter (constrained via prompt to "only modify masked positions").
+Note: AR rewriter is not a hard-constraint edit; it can serve as one baseline after Locator decoupling (corresponding to §C2 Pending).
 
-- `gen_rerank.py` 新增：
-  - `--score_mode {self_judge,heuristic,logprob}`（默认 `self_judge`）
-  - `--logprob_norm {avg,sum}`（默认 `avg`）
-- `self_judge`：同一模型做 listwise 选择（一次从 N 个候选里选最佳），作为默认 baseline
-- `logprob` 评分通过 teacher-forcing 计算 `sum_logprob / avg_logprob`
-- 每个候选在 `rerank_candidates` 里保留：
-  - `sum_logprob`
-  - `avg_logprob`
-  - `logprob_n_tokens`
-  - `logprob_error`（若模型不支持则回退 heuristic）
+---
 
-两种常见做法：
+## B. Locator Model Replacement (Implemented)
 
-1. **Self-scoring（同模型打分）**
-   - 采样得到多个候选 `c_i`
-   - 计算 `log p_AR(c_i | prompt)`（或按 token 平均）
-   - 选择最大者作为 best-of-n
+**Core question**: When the Locator is replaced with models of different architectures/scales, how does pass@1 change?
 
-2. **Cross-scoring（异模型/辅助模型打分）**
-   - 采样来自模型 A（更会“发散”）
-   - 打分来自模型 B（更“稳/守规矩”）
+This experiment directly tests dLLM's contribution in the localization stage: **Is bidirectional context perception necessary? Is it worth loading a 7B dLLM for scoring?**
 
-实现提示（后续可继续增强）：
+### Three Locators
 
-- 对 HF `AutoModelForCausalLM`：
-  - 拼接 `prompt_ids + completion_ids`
-  - 用 teacher forcing 取每个 completion token 的 `log_softmax`
-  - 汇总为 sum / mean（建议 report 两者）
-- 对 API 模型：
-  - 若提供 logprobs 接口（因服务商而异），可直接取；否则只能用本地模型做 proxy
+| Name | Params | Perception | Extra Inference Cost | How to Use |
+|------|--------|------------|---------------------|-----------|
+| `dream` (default) | 7B | **Bidirectional** (diffusion LM full-sequence forward) | 0 (shared with Rewriter) | default behavior |
+| `ar` | 7B | **Unidirectional** (AR teacher-forced logprob) | 1 AR forward pass | `--locator ar` |
+| `bert` | 125M | **Bidirectional** (CodeBERT MLM head, single forward) | Minimal | `--locator bert` |
 
-建议报告：
+Example runs:
 
-- `sum_logprob`、`avg_logprob_per_token`
-- length normalization 是否引入偏好（短输出更占优）
+```bash
+# AR locator (test "is bidirectional perception necessary?")
+python -m coder.scripts.gen_remask \
+  --input  outputs/base_tuteng/deepseek_humaneval.jsonl \
+  --out    outputs/ablation_locator/deepseek_dream_humaneval_t0.9_loc_ar.jsonl \
+  --locator ar --mask_ratio 0.9
 
-推荐最小命令：
+# BERT locator (test "is 125M sufficient?")
+python -m coder.scripts.gen_remask \
+  --input  outputs/base_tuteng/deepseek_humaneval.jsonl \
+  --out    outputs/ablation_locator/deepseek_dream_humaneval_t0.9_loc_bert.jsonl \
+  --locator bert --mask_ratio 0.9
+```
 
-`python -m coder.scripts.gen_rerank --model <model> --dataset <humaneval|mbpp> --num_samples 8 --score_mode logprob --logprob_norm avg --out <...jsonl>`
+Full experiment spec: `docs/specs/done/spec_locator_ablation.md`.
 
-## C. Reflexion baseline（Shinn et al., 2023）（已实现简化版）
+### Auxiliary Analysis: Fault Detection Ratio
 
-脚本：`python -m coder.scripts.gen_reflexion`
+Without running full pass@1, you can quickly evaluate Locator fault detection capability from existing artifacts:
 
-简化流程（默认 1 轮）：
+```bash
+python -m coder.analysis.locator_scoring \
+  --remask_dir outputs/base_tuteng --dataset humaneval --device cuda
+```
 
-- 输入：problem + previous attempt（draft）
-- 产出：`reflection`（不输出代码）→ `revised`（只输出代码）
-- 输出 JSONL：保留 `draft_completion`，写 `raw_completion/solution` 为修订版，同时保存 `reflexion_trace`（逐轮记录）
+Outputs `P(fault) / P(non-fault)` ratio — higher ratio means the Locator better distinguishes truly erroneous tokens from correct ones.
 
-可选项：
+### Expected Conclusions and Paper Significance
 
-- `--rounds T`：多轮 reflexion（默认 1）
-- `--feedback_key KEY`：如果输入 JSONL 里包含某种“失败反馈”，可把该字段拼进 reflection prompt（支持 dotted key，如 `eval.error`）
-- `--feedback_file FILE` + `--feedback_field KEY`：按 `task_id` join 外部反馈文件（默认取 `failure_summary`）
+- **If AR < dLLM**: bidirectional context perception is effective; dLLM's Locator role has independent contribution
+- **If BERT ≈ dLLM**: 125M lightweight bidirectional model is sufficient; no need to load an extra 7B model
+- **If AR ≈ dLLM**: error localization mainly depends on local context; bidirectional perception is not critical
 
-配套抽取器（EvalPlus）：
+---
 
-- `python -m coder.analysis.evalplus_feedback --eval_results <..._eval_results.json> --out_feedback <...evalplus_feedback.jsonl>`
-- 输出字段：`task_id`、`passed_base`、`base_status`、`base_status_counts`、`failure_summary`（可选 `raw_details`）
+## C. Reranking with AR Logprobs (Basic Version Implemented)
 
-## C. Pending：后续可做但先不实现（记录）
+**Background**: This section covers Best-of-N candidate reranking (`gen_rerank.py`), independent of the §B remask locator; it is a separate pipeline.
 
-### C1. 多轮局部修补（T 轮）
+Script: `python -m coder.scripts.gen_rerank`
 
-定位→rewrite→再定位→再rewrite，观察 T=1/2/3 的收益与退化。
+`--score_mode` options:
+- `self_judge` (default): AR model does listwise selection, picks one from N candidates
+- `logprob`: teacher-forced `sum/avg log p(completion | prompt)`, takes best by score
+- `heuristic`: heuristic scoring (legacy fallback)
 
-### C2. 组合方向性
+```bash
+python -m coder.scripts.gen_rerank \
+  --model deepseek-ai/deepseek-coder-6.7b-instruct \
+  --dataset humaneval --num_samples 8 \
+  --score_mode logprob --logprob_norm avg \
+  --out outputs/ablation/deepseek_rerank_logprob_k8_humaneval.jsonl
+```
 
-- AR→diffusion(remask)
-- diffusion(locator)→AR(rewrite)
-- diffusion→AR(self-refine)
+---
 
-### C3. Prompt / 输出格式鲁棒性
+## D. Reflexion Baseline (Simplified Version Implemented)
 
-- code fence、system prompt 强度、max_new_tokens 截断敏感性
+Script: `python -m coder.scripts.gen_reflexion`
 
-### C4. “编辑幅度 vs 成功率”分析图
+Pipeline (default 1 round): problem + draft → `reflection` (verbal reflection) → `revised` (revised code).
 
-统计每题 mask 数、diff 距离、是否通过，寻找最佳编辑幅度区间。
+Options:
+- `--rounds T`: multi-round reflexion
+- `--feedback_key KEY` / `--feedback_file FILE`: inject real eval failure feedback (EvalPlus supported)
 
+Companion feedback extraction:
+```bash
+python -m coder.analysis.evalplus_feedback \
+  --eval_results <..._eval_results.json> --out_feedback <...evalplus_feedback.jsonl>
+```
+
+---
+
+## E. Pending: Follow-up Work (Not Yet Implemented)
+
+### E1. Multi-Round Local Patching (T Rounds)
+
+Locate → rewrite → re-locate → re-rewrite; observe gains and degradation at T=1/2/3.
+Corresponds to §B three-role framework: each round can use a different Locator.
+
+### E2. More Combinations of Decoupled Locator
+
+The three-role framework theoretically allows arbitrary combinations:
+
+| Drafter | Locator | Rewriter |
+|---------|---------|---------|
+| AR | dLLM (default) | dLLM |
+| AR | AR (§B ablation) | dLLM |
+| AR | BERT (§B ablation) | dLLM |
+| AR | dLLM | AR (A2, implemented) |
+| AR | Random (pure ablation baseline) | dLLM |
+
+Random locator (randomly mask the same proportion of tokens) is the cleanest ablation baseline: if random ≈ dLLM, it means localization itself has no value.
+
+### E3. (τ, temperature, top-p) Joint Sensitivity
+
+`gen_remask --temperature --top_p` sweep; design in `ablation_ideas.md` §A.
+
+### E4. "Edit Magnitude vs. Success Rate" Analysis Plot
+
+Count mask count, diff distance, and pass/fail per problem; find the optimal edit magnitude range (cross-analyzed with Locator type).
+
+### E5. Prompt / Output Format Robustness
+
+Code fence sensitivity, system prompt strength, max_new_tokens truncation sensitivity.

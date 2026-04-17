@@ -15,6 +15,9 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[3]
 OUTPUTS = REPO_ROOT / "outputs" / "base_tuteng"
 REMASK_KODAI = REPO_ROOT / "outputs" / "remask_kodai"
+ABLATION_LOCATOR = REPO_ROOT / "outputs" / "ablation_locator"
+RESEARCH_OUT = REPO_ROOT / "outputs" / "research"
+WRITING_OUT = REPO_ROOT / "outputs" / "writing"
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +67,9 @@ def _load_evalplus_summary(path: Path | None) -> dict[str, Any] | None:
 def _load_timing(timing_path: Path | None, expected_n: int | None = None) -> float | None:
     """Load avg s/sample from a *.timing_summary.json file.
 
-    Returns None if file missing, timing field absent, or n_records doesn't
-    match expected_n (prevents returning garbage from partial runs).
+    Returns None if file missing, timing field absent, n_records doesn't
+    match expected_n, or gen_remask reports zero generation time (resume-only
+    timing files can have complete row counts but no real generation timing).
     """
     data = _load_json(timing_path) if timing_path else None
     if data is None:
@@ -76,6 +80,8 @@ def _load_timing(timing_path: Path | None, expected_n: int | None = None) -> flo
     n = data.get("n_records_written")
     if expected_n is not None and n is not None and abs(n - expected_n) > 2:
         return None  # partial run, don't trust
+    if "remask_generate_s_total" in t and t["remask_generate_s_total"] <= 0:
+        return None  # resume-only run, don't trust
     if n:
         return round(t["total_s"] / n, 1)
     return None
@@ -155,7 +161,7 @@ _STANDALONE_ENTRIES = [
         "qwen_humaneval_summary.json",
         "qwen_mbpp_summary.json",
         "qwen_livecodebench_summary.json",
-        "qwen_bigcodebench_instruct_full_pass_at_k.json",
+        "qwen_bigcodebench_instruct_full_pass1_clean_pass_at_k.json",
         "qwen_humaneval_timed.jsonl.timing_summary.json",
         "qwen_mbpp_timed.jsonl.timing_summary.json",
     ),
@@ -164,7 +170,7 @@ _STANDALONE_ENTRIES = [
         "llama31_humaneval_summary.json",
         "llama31_mbpp_summary.json",
         "llama31_livecodebench_summary.json",
-        "llama31_bigcodebench_instruct_full_pass_at_k.json",
+        "llama31_bigcodebench_instruct_full_pass1_clean_pass_at_k.json",
         "llama31_humaneval_timed.jsonl.timing_summary.json",
         "llama31_mbpp_timed.jsonl.timing_summary.json",
     ),
@@ -176,6 +182,15 @@ _STANDALONE_ENTRIES = [
         None,
         "mistral_humaneval_timed.jsonl.timing_summary.json",
         "mistral_mbpp_timed.jsonl.timing_summary.json",
+    ),
+    (
+        "CodeLlama 7B",
+        "codellama_humaneval_summary.json",
+        "codellama_mbpp_summary.json",
+        None,
+        None,
+        "codellama_humaneval.jsonl.timing_summary.json",
+        "codellama_mbpp.jsonl.timing_summary.json",
     ),
     (
         "StarCoder2 7B",
@@ -212,6 +227,15 @@ _STANDALONE_ENTRIES = [
         None,
         "seed-coder_humaneval_timed.jsonl.timing_summary.json",
         "seed-coder_mbpp_timed.jsonl.timing_summary.json",
+    ),
+    (
+        "Seed-Coder-Instruct 8B",
+        "seed-coder-instruct_humaneval_summary.json",
+        "seed-coder-instruct_mbpp_summary.json",
+        None,
+        None,
+        "seed-coder-instruct_humaneval.jsonl.timing_summary.json",
+        "seed-coder-instruct_mbpp.jsonl.timing_summary.json",
     ),
     (
         "Seed-DiffCoder 8B",
@@ -276,36 +300,94 @@ def section_table3_model_pairs(out: list[str]) -> None:
     data = _load_json(pairs_path)
 
     out.append("## Table 3 — Model Pairs（τ=0.9, pass@1 plus%）\n")
+    out.append('> 注：当前所有实验 Locator 与 Rewriter 均为同一 dLLM（均等于"dLLM 精炼"列原始含义）。\n')
     headers = [
-        "Dataset", "AR 草稿", "dLLM 精炼",
+        "Dataset", "AR 草稿", "Locator", "Rewriter",
         "AR-only", "Collab", "Δ",
+        "修对(+)", "弄坏(-)",
         "s/sample", "状态",
     ]
     out.append(_fmt_row(*headers))
     out.append(_hr(len(headers)))
 
     if data is None or "rows" not in data:
-        out.append(_fmt_row("*（model_pairs_all_t0.9.json 不存在）*", *[""] * 7))
+        out.append(_fmt_row("*（model_pairs_all_t0.9.json 不存在）*", *[""] * 8))
         out.append("")
         return
 
     # timing file map: slug → timing_summary path
     _PAIR_TIMING: dict[str, Path] = {
-        "deepseek_llada_humaneval_t0.9":
-            OUTPUTS / "deepseek_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        # HumanEval
+        "deepseek_dream_humaneval_t0.9":
+            OUTPUTS / "deepseek_dream_remask_humaneval_t0.9_timed.jsonl.timing_summary.json",
+        "qwen_dream_humaneval_t0.9":
+            OUTPUTS / "qwen_dream_remask_humaneval_t0.9_timed.jsonl.timing_summary.json",
         "llama31_dream_humaneval_t0.9":
             OUTPUTS / "llama31_dream_remask_humaneval_t0.9.jsonl.timing_summary.json",
-        "llama31_dream_mbpp_t0.9":
-            OUTPUTS / "llama31_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "starcoder2_dream_humaneval_t0.9":
+            OUTPUTS / "starcoder2_dream_remask_humaneval_t0.9_timed.jsonl.timing_summary.json",
+        "deepseek_llada_humaneval_t0.9":
+            OUTPUTS / "deepseek_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "qwen_llada_humaneval_t0.9":
+            OUTPUTS / "qwen_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "llama31_llada_humaneval_t0.9":
+            OUTPUTS / "llama31_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "starcoder2_llada_humaneval_t0.9":
+            OUTPUTS / "starcoder2_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "mistral_dream_humaneval_t0.9":
+            OUTPUTS / "mistral_dream_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "mistral_llada_humaneval_t0.9":
+            OUTPUTS / "mistral_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "codellama_dream_humaneval_t0.9":
+            OUTPUTS / "codellama_dream_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "codellama_llada_humaneval_t0.9":
+            OUTPUTS / "codellama_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "seed_coder_instruct_dream_humaneval_t0.9":
+            OUTPUTS / "seed-coder-instruct_dream_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "seed_coder_instruct_llada_humaneval_t0.9":
+            OUTPUTS / "seed-coder-instruct_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        # MBPP
+        "deepseek_dream_mbpp_t0.9":
+            OUTPUTS / "deepseek_dream_remask_mbpp_t0.9_timed.jsonl.timing_summary.json",
         "qwen_dream_mbpp_t0.9":
             OUTPUTS / "qwen_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "llama31_dream_mbpp_t0.9":
+            OUTPUTS / "llama31_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
         "starcoder2_dream_mbpp_t0.9":
             OUTPUTS / "starcoder2_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "deepseek_llada_mbpp_t0.9":
+            OUTPUTS / "deepseek_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "qwen_llada_mbpp_t0.9":
+            OUTPUTS / "qwen_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "llama31_llada_mbpp_t0.9":
+            OUTPUTS / "llama31_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "starcoder2_llada_mbpp_t0.9":
+            OUTPUTS / "starcoder2_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "mistral_dream_mbpp_t0.9":
+            OUTPUTS / "mistral_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "mistral_llada_mbpp_t0.9":
+            OUTPUTS / "mistral_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "codellama_dream_mbpp_t0.9":
+            OUTPUTS / "codellama_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "codellama_llada_mbpp_t0.9":
+            OUTPUTS / "codellama_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "seed_coder_instruct_dream_mbpp_t0.9":
+            OUTPUTS / "seed-coder-instruct_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+        "seed_coder_instruct_llada_mbpp_t0.9":
+            OUTPUTS / "seed-coder-instruct_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
     }
     _PAIR_EXPECTED_N = {
         "humaneval": 164,
         "mbpp": 378,
     }
+
+    # Build AR timing lookup: label → {"humaneval": t_he, "mbpp": t_mbpp}
+    _n_he, _n_mb = 164, 378
+    _ar_timing: dict[str, dict[str, float | None]] = {}
+    for (label, he_f, mbpp_f, _lcb_f, _bcb_f, t_he_f, t_mb_f) in _STANDALONE_ENTRIES:
+        t_he = _load_timing(OUTPUTS / t_he_f if t_he_f else None, _n_he)
+        t_mb = _load_timing(OUTPUTS / t_mb_f if t_mb_f else None, _n_mb)
+        _ar_timing[label] = {"humaneval": t_he, "mbpp": t_mb}
 
     prev_dataset = None
     for row in data["rows"]:
@@ -315,6 +397,8 @@ def section_table3_model_pairs(out: list[str]) -> None:
         slug = row.get("slug", "")
         ar_pct = row.get("ar_only_pass_at_1_pct")
         collab_pct = row.get("collab_pass_at_1_pct")
+        wrong_to_right = row.get("wrong_to_right")
+        right_to_wrong = row.get("right_to_wrong")
         cs = row.get("collab_status", {})
         is_complete = cs.get("is_fully_complete", False)
         is_gen = cs.get("is_generation_complete", False)
@@ -328,27 +412,37 @@ def section_table3_model_pairs(out: list[str]) -> None:
             n_exp = cs.get("expected_tasks", "?")
             status = f"🔄 {n_done}/{n_exp}"
 
-        # timing
+        # timing: AR draft + remask/denoising
         t_path = _PAIR_TIMING.get(slug)
         exp_n = _PAIR_EXPECTED_N.get(dataset)
-        t = _load_timing(t_path, exp_n)
+        t_remask = _load_timing(t_path, exp_n)
+        t_ar = _ar_timing.get(ar, {}).get(dataset)
+        if t_remask is not None and t_ar is not None:
+            t_total: float | None = round(t_remask + t_ar, 1)
+        elif t_remask is not None:
+            t_total = t_remask  # AR timing missing, show remask only
+        else:
+            t_total = None
 
         # separator between datasets
         if prev_dataset and dataset != prev_dataset:
             out.append(_fmt_row(*[""] * len(headers)))
         prev_dataset = dataset
 
+        w2r = str(wrong_to_right) if wrong_to_right is not None else "—"
+        r2w = str(right_to_wrong) if right_to_wrong is not None else "—"
         out.append(_fmt_row(
-            dataset, ar, dllm,
+            dataset, ar, dllm, dllm,
             _pct(ar_pct), _pct(collab_pct), _delta(ar_pct, collab_pct),
-            _sps(t), status,
+            w2r, r2w,
+            _sps(t_total), status,
         ))
 
     out.append("")
     out.append(f"> 产物：`{pairs_path.relative_to(REPO_ROOT)}`"
                f"  —  更新命令：`python -m coder.scripts.model_pairs_evalplus`\n")
-    out.append("> s/sample = collab 生成阶段（remask + denoising）的平均每题耗时。"
-               "AR 草稿生成耗时未单独计入（gen_evalplus 尚未统计 timing）。\n")
+    out.append("> s/sample = AR 草稿生成 + remask + dLLM denoising 的全流程平均每题耗时。\n")
+    out.append("> Locator / Rewriter 拆分：当前实验均以同一 dLLM 同时充当两角色；后续 math 实验中可独立配置。\n")
 
 
 # ---------------------------------------------------------------------------
@@ -408,10 +502,10 @@ _BASELINE_ENTRIES = [
 ]
 
 
-def section_table4_baselines(out: list[str]) -> None:
-    out.append("## Table 4 — DeepSeek-Coder Baselines（pass@1 plus%）\n")
+def section_table4_all_baselines(out: list[str]) -> None:
+    out.append("## Table 4 — AR Model Baselines（pass@1 plus%）\n")
     headers = [
-        "方法",
+        "AR 模型", "方法",
         "HE+ plus%", "HE+ base%",
         "MBPP+ plus%", "MBPP+ base%",
         "s/sample (HE)", "s/sample (MBPP)",
@@ -419,15 +513,85 @@ def section_table4_baselines(out: list[str]) -> None:
     out.append(_fmt_row(*headers))
     out.append(_hr(len(headers)))
 
-    for (label, he_f, mbpp_f, t_he_f, t_mb_f) in _BASELINE_ENTRIES:
-        he = _load_evalplus_summary(_resolve(he_f))
-        mb = _load_evalplus_summary(_resolve(mbpp_f))
+    all_groups = [
+        ("DeepSeek-Coder 6.7B", _BASELINE_ENTRIES),
+        ("Qwen2.5-Coder 7B",    _QWEN_BASELINE_ENTRIES),
+        ("Llama-3.1 8B",        _LLAMA31_BASELINE_ENTRIES),
+        ("StarCoder2 7B",       _STARCODER2_BASELINE_ENTRIES),
+    ]
+
+    first_group = True
+    for ar_label, entries in all_groups:
+        if not first_group:
+            out.append(_fmt_row(*[""] * len(headers)))
+        first_group = False
+        for i, (label, he_f, mbpp_f, t_he_f, t_mb_f) in enumerate(entries):
+            he = _load_evalplus_summary(_resolve(he_f))
+            mb = _load_evalplus_summary(_resolve(mbpp_f))
+            n_he = he["n_tasks"] if he else None
+            n_mb = mb["n_tasks"] if mb else None
+            t_he = _load_timing(OUTPUTS / t_he_f if t_he_f else None, n_he)
+            t_mb = _load_timing(OUTPUTS / t_mb_f if t_mb_f else None, n_mb)
+            out.append(_fmt_row(
+                ar_label if i == 0 else "",
+                label,
+                _pct(he["plus_pct"] if he else None),
+                _pct(he["base_pct"] if he else None),
+                _pct(mb["plus_pct"] if mb else None),
+                _pct(mb["base_pct"] if mb else None),
+                _sps(t_he), _sps(t_mb),
+            ))
+    out.append("")
+    out.append("> s/sample = 方法总耗时 / 题目数。DeepSeek baseline timing 来自 `_timed` 重跑产物。\n")
+
+
+# ---------------------------------------------------------------------------
+# Section: Locator Ablation
+# ---------------------------------------------------------------------------
+
+_LOCATOR_ABLATION_ENTRIES = [
+    (
+        "dLLM locator (ours)",
+        REMASK_KODAI / "remask_humaneval_t0.9_summary.json",
+        REMASK_KODAI / "remask_mbpp_t0.9_summary.json",
+        OUTPUTS / "deepseek_dream_remask_humaneval_t0.9_timed.jsonl.timing_summary.json",
+        OUTPUTS / "deepseek_dream_remask_mbpp_t0.9_timed.jsonl.timing_summary.json",
+    ),
+    (
+        "AR logprob locator",
+        ABLATION_LOCATOR / "deepseek_dream_humaneval_t0.9_loc_ar_summary.json",
+        ABLATION_LOCATOR / "deepseek_dream_mbpp_t0.9_loc_ar_summary.json",
+        ABLATION_LOCATOR / "deepseek_dream_humaneval_t0.9_loc_ar.jsonl.timing_summary.json",
+        ABLATION_LOCATOR / "deepseek_dream_mbpp_t0.9_loc_ar.jsonl.timing_summary.json",
+    ),
+    (
+        "CodeBERT locator",
+        ABLATION_LOCATOR / "deepseek_dream_humaneval_t0.9_loc_bert_summary.json",
+        ABLATION_LOCATOR / "deepseek_dream_mbpp_t0.9_loc_bert_summary.json",
+        ABLATION_LOCATOR / "deepseek_dream_humaneval_t0.9_loc_bert.jsonl.timing_summary.json",
+        ABLATION_LOCATOR / "deepseek_dream_mbpp_t0.9_loc_bert.jsonl.timing_summary.json",
+    ),
+]
+
+
+def section_locator_ablation(out: list[str]) -> None:
+    out.append("## Locator Ablation（DeepSeek-Coder + Dream refine）\n")
+    headers = [
+        "Locator",
+        "HE+ plus%", "HE+ base%",
+        "MBPP+ plus%", "MBPP+ base%",
+        "s/sample (HE)", "s/sample (MBPP)",
+    ]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    for label, he_path, mbpp_path, he_timing_path, mbpp_timing_path in _LOCATOR_ABLATION_ENTRIES:
+        he = _load_evalplus_summary(he_path)
+        mb = _load_evalplus_summary(mbpp_path)
         n_he = he["n_tasks"] if he else None
         n_mb = mb["n_tasks"] if mb else None
-
-        t_he = _load_timing(OUTPUTS / t_he_f if t_he_f else None, n_he)
-        t_mb = _load_timing(OUTPUTS / t_mb_f if t_mb_f else None, n_mb)
-
+        t_he = _load_timing(he_timing_path, n_he)
+        t_mb = _load_timing(mbpp_timing_path, n_mb)
         out.append(_fmt_row(
             label,
             _pct(he["plus_pct"] if he else None),
@@ -436,8 +600,9 @@ def section_table4_baselines(out: list[str]) -> None:
             _pct(mb["base_pct"] if mb else None),
             _sps(t_he), _sps(t_mb),
         ))
+
     out.append("")
-    out.append("> s/sample = 方法总耗时 / 题目数。baseline timing 来自 `_timed` 重跑产物。\n")
+    out.append("> AR / CodeBERT locator rows use `confidence_threshold=0.9`; refine model remains Dream-Coder 7B.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +657,7 @@ _QWEN_BASELINE_ENTRIES = [
         "+ Dream remask τ=0.9 (ours)",
         "qwen_dream_remask_humaneval_t0.9_summary.json",
         "qwen_dream_remask_mbpp_t0.9_summary.json",
-        "qwen_dream_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "qwen_dream_remask_humaneval_t0.9_timed.jsonl.timing_summary.json",
         "qwen_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
     ),
 ]
@@ -531,6 +696,241 @@ def section_table4_qwen_baselines(out: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Section: Table 4c — Llama-3.1 8B Baselines
+# ---------------------------------------------------------------------------
+
+_LLAMA31_BASELINE_ENTRIES = [
+    (
+        "Llama-3.1 baseline",
+        "llama31_humaneval_summary.json",
+        "llama31_mbpp_summary.json",
+        "llama31_humaneval_timed.jsonl.timing_summary.json",
+        "llama31_mbpp_timed.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Self-Refine",
+        "llama31_humaneval_selfrefine_r1_summary.json",
+        "llama31_mbpp_selfrefine_r1_summary.json",
+        "llama31_humaneval_selfrefine_r1.jsonl.timing_summary.json",
+        "llama31_mbpp_selfrefine_r1.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Reflexion (w/ feedback)",
+        "llama31_humaneval_reflexion_feedback_r1_summary.json",
+        "llama31_mbpp_reflexion_feedback_r1_summary.json",
+        "llama31_humaneval_reflexion_feedback_r1.jsonl.timing_summary.json",
+        "llama31_mbpp_reflexion_feedback_r1.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Rerank logprob k=8",
+        "llama31_humaneval_rerank_logprob_k8_summary.json",
+        "llama31_mbpp_rerank_logprob_k8_summary.json",
+        "llama31_humaneval_rerank_logprob_k8.jsonl.timing_summary.json",
+        "llama31_mbpp_rerank_logprob_k8.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Locate-AR-Rewrite",
+        "llama31_humaneval_locate_ar_rewrite_t0.9_summary.json",
+        "llama31_mbpp_locate_ar_rewrite_t0.9_summary.json",
+        "llama31_humaneval_locate_ar_rewrite_t0.9.jsonl.timing_summary.json",
+        "llama31_mbpp_locate_ar_rewrite_t0.9.jsonl.timing_summary.json",
+    ),
+    (
+        "+ LLaDA remask τ=0.9",
+        "llama31_llada_remask_humaneval_t0.9_summary.json",
+        "llama31_llada_remask_mbpp_t0.9_summary.json",
+        "llama31_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "llama31_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Dream remask τ=0.9 (ours)",
+        "llama31_dream_remask_humaneval_t0.9_summary.json",
+        "llama31_dream_remask_mbpp_t0.9_summary.json",
+        "llama31_dream_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "llama31_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+    ),
+]
+
+
+def section_table4_llama31_baselines(out: list[str]) -> None:
+    out.append("## Table 4c — Llama-3.1 8B Baselines（pass@1 plus%）\n")
+    headers = [
+        "方法",
+        "HE+ plus%", "HE+ base%",
+        "MBPP+ plus%", "MBPP+ base%",
+        "s/sample (HE)", "s/sample (MBPP)",
+    ]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    for (label, he_f, mbpp_f, t_he_f, t_mb_f) in _LLAMA31_BASELINE_ENTRIES:
+        he = _load_evalplus_summary(OUTPUTS / he_f if he_f else None)
+        mb = _load_evalplus_summary(OUTPUTS / mbpp_f if mbpp_f else None)
+        n_he = he["n_tasks"] if he else None
+        n_mb = mb["n_tasks"] if mb else None
+
+        t_he = _load_timing(OUTPUTS / t_he_f if t_he_f else None, n_he)
+        t_mb = _load_timing(OUTPUTS / t_mb_f if t_mb_f else None, n_mb)
+
+        out.append(_fmt_row(
+            label,
+            _pct(he["plus_pct"] if he else None),
+            _pct(he["base_pct"] if he else None),
+            _pct(mb["plus_pct"] if mb else None),
+            _pct(mb["base_pct"] if mb else None),
+            _sps(t_he), _sps(t_mb),
+        ))
+    out.append("")
+    out.append("> s/sample = 方法总耗时 / 题目数。\n")
+
+
+# ---------------------------------------------------------------------------
+# Section: Table 4d — StarCoder2 7B Baselines
+# ---------------------------------------------------------------------------
+
+_STARCODER2_BASELINE_ENTRIES = [
+    (
+        "StarCoder2 baseline",
+        "starcoder2_humaneval_summary.json",
+        "starcoder2_mbpp_summary.json",
+        "starcoder2_humaneval_timed.jsonl.timing_summary.json",
+        "starcoder2_mbpp_timed.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Self-Refine",
+        "starcoder2_humaneval_selfrefine_r1_summary.json",
+        "starcoder2_mbpp_selfrefine_r1_summary.json",
+        "starcoder2_humaneval_selfrefine_r1.jsonl.timing_summary.json",
+        "starcoder2_mbpp_selfrefine_r1.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Reflexion (w/ feedback)",
+        "starcoder2_humaneval_reflexion_feedback_r1_summary.json",
+        "starcoder2_mbpp_reflexion_feedback_r1_summary.json",
+        "starcoder2_humaneval_reflexion_feedback_r1.jsonl.timing_summary.json",
+        "starcoder2_mbpp_reflexion_feedback_r1.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Rerank logprob k=8",
+        "starcoder2_humaneval_rerank_logprob_k8_summary.json",
+        "starcoder2_mbpp_rerank_logprob_k8_summary.json",
+        "starcoder2_humaneval_rerank_logprob_k8.jsonl.timing_summary.json",
+        "starcoder2_mbpp_rerank_logprob_k8.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Locate-AR-Rewrite",
+        "starcoder2_humaneval_locate_ar_rewrite_t0.9_summary.json",
+        "starcoder2_mbpp_locate_ar_rewrite_t0.9_summary.json",
+        "starcoder2_humaneval_locate_ar_rewrite_t0.9.jsonl.timing_summary.json",
+        "starcoder2_mbpp_locate_ar_rewrite_t0.9.jsonl.timing_summary.json",
+    ),
+    (
+        "+ LLaDA remask τ=0.9",
+        "starcoder2_llada_remask_humaneval_t0.9_summary.json",
+        "starcoder2_llada_remask_mbpp_t0.9_summary.json",
+        "starcoder2_llada_remask_humaneval_t0.9.jsonl.timing_summary.json",
+        "starcoder2_llada_remask_mbpp_t0.9.jsonl.timing_summary.json",
+    ),
+    (
+        "+ Dream remask τ=0.9 (ours)",
+        "starcoder2_dream_remask_humaneval_t0.9_summary.json",
+        "starcoder2_dream_remask_mbpp_t0.9_summary.json",
+        "starcoder2_dream_remask_humaneval_t0.9_timed.jsonl.timing_summary.json",
+        "starcoder2_dream_remask_mbpp_t0.9.jsonl.timing_summary.json",
+    ),
+]
+
+
+def section_table4_starcoder2_baselines(out: list[str]) -> None:
+    out.append("## Table 4d — StarCoder2 7B Baselines（pass@1 plus%）\n")
+    headers = [
+        "方法",
+        "HE+ plus%", "HE+ base%",
+        "MBPP+ plus%", "MBPP+ base%",
+        "s/sample (HE)", "s/sample (MBPP)",
+    ]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    for (label, he_f, mbpp_f, t_he_f, t_mb_f) in _STARCODER2_BASELINE_ENTRIES:
+        he = _load_evalplus_summary(OUTPUTS / he_f if he_f else None)
+        mb = _load_evalplus_summary(OUTPUTS / mbpp_f if mbpp_f else None)
+        n_he = he["n_tasks"] if he else None
+        n_mb = mb["n_tasks"] if mb else None
+
+        t_he = _load_timing(OUTPUTS / t_he_f if t_he_f else None, n_he)
+        t_mb = _load_timing(OUTPUTS / t_mb_f if t_mb_f else None, n_mb)
+
+        out.append(_fmt_row(
+            label,
+            _pct(he["plus_pct"] if he else None),
+            _pct(he["base_pct"] if he else None),
+            _pct(mb["plus_pct"] if mb else None),
+            _pct(mb["base_pct"] if mb else None),
+            _sps(t_he), _sps(t_mb),
+        ))
+    out.append("")
+    out.append("> s/sample = 方法总耗时 / 题目数。\n")
+
+
+# ---------------------------------------------------------------------------
+# Section: Locator Fault-Detection Analysis
+# ---------------------------------------------------------------------------
+
+def section_locator_fault_detection(out: list[str]) -> None:
+    """P(fault token) vs P(non-fault token) ratio — intrinsic locator quality."""
+    data = _load_json(ABLATION_LOCATOR / "locator_fault_detection_summary.json")
+    out.append("## Locator Fault-Detection Analysis\n")
+    out.append(
+        "> \"Surgical fault pairs\": 草稿失败 → remask 后通过，且改动 ≤10 字符的样本。"
+        " 对每个 fault token 和 non-fault token 计算模型置信度，ratio = P(non-fault) / P(fault)，"
+        "越高说明 locator 对错误位置的感知越敏锐。\n"
+    )
+    out.append("> AR 草稿：DeepSeek-Coder 6.7B，τ=0.9，dedupe_task=True。\n")
+
+    headers = [
+        "Locator",
+        "HE P(fault)", "HE P(non-fault)", "HE ratio",
+        "MBPP P(fault)", "MBPP P(non-fault)", "MBPP ratio",
+    ]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    if data is None:
+        out.append(_fmt_row("*（locator_fault_detection_summary.json 不存在）*", *[""] * 6))
+        out.append("")
+        return
+
+    for row in data.get("rows", []):
+        he = row.get("humaneval", {})
+        mb = row.get("mbpp", {})
+
+        def _p(d: dict, key: str) -> str:
+            v = d.get(key)
+            return f"{v:.3f}" if v is not None else "—"
+
+        def _ratio(d: dict) -> str:
+            v = d.get("ratio")
+            return f"**{v:.2f}x**" if v is not None else "—"
+
+        out.append(_fmt_row(
+            row.get("locator", "?"),
+            _p(he, "p_fault_mean"), _p(he, "p_nonfault_mean"), _ratio(he),
+            _p(mb, "p_fault_mean"), _p(mb, "p_nonfault_mean"), _ratio(mb),
+        ))
+
+    out.append("")
+    out.append(
+        f"> 产物：`outputs/ablation_locator/locator_fault_detection_summary.json`"
+        f"  —  源 log：`outputs/ablation_locator/locator_scoring_clean_t09_deepseek.log`\n"
+    )
+    out.append(
+        "> dLLM locator 对 fault token 置信度极低（HE P≈0.04，MBPP P≈0.008），"
+        "与 non-fault token 差距悬殊；AR 和 MLM locator 几乎无区分（ratio≈1x）。\n"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Section: Math Benchmarks (GSM8K + MATH500)
 # ---------------------------------------------------------------------------
 
@@ -558,6 +958,13 @@ _MATH_ENTRIES = [
     ("StarCoder2 7B",       None,                           None),  # 待跑
 ]
 
+# (label, gsm8k_summary, math500_summary)  — AR + Dream-Coder remask collab
+_MATH_COLLAB_ENTRIES = [
+    ("DeepSeek-Coder + Dream", "deepseek_dream_remask_gsm8k_summary.json", "deepseek_dream_remask_math500_summary.json"),
+    ("Qwen2.5-Coder + Dream",  "qwen_dream_remask_gsm8k_summary.json",     None),  # MATH500 run incomplete
+    ("Llama-3.1 + Dream",      "llama31_dream_remask_gsm8k_summary.json",  "llama31_dream_remask_math500_summary.json"),
+]
+
 _MATH500_SUBJECTS = [
     "Algebra", "Prealgebra", "Precalculus",
     "Intermediate Algebra", "Number Theory", "Geometry",
@@ -582,9 +989,22 @@ def section_math(out: list[str]) -> None:
             _sps(math["s_per_sample"] if math else None),
         ))
 
+    # AR-only separator, then CoCoder collab rows
+    out.append(_fmt_row(*[""] * 5))
+    for label, gsm_f, math_f in _MATH_COLLAB_ENTRIES:
+        gsm = _load_math_summary(OUTPUTS / gsm_f if gsm_f else None)
+        math = _load_math_summary(OUTPUTS / math_f if math_f else None)
+        out.append(_fmt_row(
+            label,
+            _pct(gsm["acc_pct"] if gsm else None),
+            _sps(gsm["s_per_sample"] if gsm else None),
+            _pct(math["acc_pct"] if math else None),
+            _sps(math["s_per_sample"] if math else None),
+        ))
+
     out.append("")
     out.append("> GSM8K：1319 道小学数学题（test set）。MATH500：500 道竞赛数学题（MATH 数据集子集）。\n")
-    out.append("> 仅列 AR 模型；dLLM（Dream-Coder、LLaDA）不适用于此评测。\n")
+    out.append("> 上半部分：AR 模型独立推理 baseline；下半部分：CoCoder（AR草稿 + Dream-Coder remask τ=0.9）协作结果，整体不提升。\n")
 
     # MATH500 subject breakdown
     out.append("### MATH500 Subject Breakdown\n")
@@ -604,6 +1024,75 @@ def section_math(out: list[str]) -> None:
             cells.append(f"{s['correct']}/{s['total']} ({s['accuracy']*100:.0f}%)" if s else "—")
         out.append(_fmt_row(*cells))
     out.append("")
+
+
+# ---------------------------------------------------------------------------
+# Section: General Domain Benchmarks（research QA + writing）
+# ---------------------------------------------------------------------------
+
+def _load_qa_eval(path: Path | None) -> dict[str, Any] | None:
+    data = _load_json(path) if path else None
+    if data is None:
+        return None
+    return {
+        "n_total": data.get("n_total"),
+        "em": data.get("exact_match"),
+        "f1": data.get("token_f1"),
+    }
+
+
+def section_general_domain(out: list[str]) -> None:
+    out.append("## General Domain Benchmarks（closed-book research QA）\n")
+    out.append("> Dream-General = Dream-v0-Instruct-7B (text dLLM, not Dream-Coder)."
+               " CoCoder = Llama-3.1 draft + Dream-General remask τ=0.9."
+               " Closed-book: no retrieval.\n")
+
+    # --- FRAMES ---
+    out.append("### FRAMES（multi-hop research QA, n=824）\n")
+    frames_entries = [
+        ("Llama-3.1 8B (AR)",          RESEARCH_OUT / "frames_llama31_eval.json"),
+        ("Dream-General 7B (dLLM)",     RESEARCH_OUT / "frames_dream_general_eval.json"),
+        ("CoCoder τ=0.9 (Llama+Dream)", RESEARCH_OUT / "frames_cocoder_eval.json"),
+    ]
+    headers = ["模型", "n", "EM%", "Token F1%"]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+    for label, path in frames_entries:
+        r = _load_qa_eval(path)
+        if r is None:
+            out.append(_fmt_row(label, "—", "—", "—"))
+        else:
+            out.append(_fmt_row(
+                label,
+                str(r["n_total"]) if r["n_total"] else "—",
+                _pct(r["em"] * 100 if r["em"] is not None else None),
+                _pct(r["f1"] * 100 if r["f1"] is not None else None),
+            ))
+    out.append("")
+
+    # --- HotpotQA ---
+    out.append("### HotpotQA（multi-hop QA distractor val, n=1000）\n")
+    hotpot_entries = [
+        ("Llama-3.1 8B (AR)",          RESEARCH_OUT / "hotpotqa_llama31_eval.json"),
+        ("Dream-General 7B (dLLM)",     RESEARCH_OUT / "hotpotqa_dream_general_eval.json"),
+        ("CoCoder τ=0.9 (Llama+Dream)", RESEARCH_OUT / "hotpotqa_llama31_dream_general_t0.9_eval.json"),
+    ]
+    headers = ["模型", "n", "EM%", "Token F1%"]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+    for label, path in hotpot_entries:
+        r = _load_qa_eval(path)
+        if r is None:
+            out.append(_fmt_row(label, "—", "—", "—"))
+        else:
+            out.append(_fmt_row(
+                label,
+                str(r["n_total"]) if r["n_total"] else "—",
+                _pct(r["em"] * 100 if r["em"] is not None else None),
+                _pct(r["f1"] * 100 if r["f1"] is not None else None),
+            ))
+    out.append("")
+    out.append("> WildBench Writing (n=146) 生成已完成（llama31 / dream_general），eval 需 LLM judge（API key），CoCoder run 仍在进行（37/146）。\n")
 
 
 # ---------------------------------------------------------------------------
@@ -675,14 +1164,12 @@ def section_table2_extended(out: list[str]) -> None:
     # BigCodeBench
     out.append("### BigCodeBench（instruct, full, pass@1%）\n")
     bcb_entries = [
-        ("DeepSeek-Coder 6.7B (pass1_clean)",
+        ("DeepSeek-Coder 6.7B",
          "deepseek_bigcodebench_instruct_full_pass1_clean_pass_at_k.json"),
-        ("DeepSeek-Coder 6.7B (raw)",
-         "deepseek_bigcodebench_instruct_full_pass_at_k.json"),
-        ("Qwen2.5-Coder 7B (raw)",
-         "qwen_bigcodebench_instruct_full_pass_at_k.json"),
-        ("Llama-3.1 8B (raw)",
-         "llama31_bigcodebench_instruct_full_pass_at_k.json"),
+        ("Qwen2.5-Coder 7B",
+         "qwen_bigcodebench_instruct_full_pass1_clean_pass_at_k.json"),
+        ("Llama-3.1 8B",
+         "llama31_bigcodebench_instruct_full_pass1_clean_pass_at_k.json"),
         ("Collab τ=0.9 (n=100)",
          "sample100_collab_t0.9_bigcodebench_instruct_full_seed3407_summary.json"),
         ("Dream (n=100)",
@@ -706,7 +1193,7 @@ def section_table2_extended(out: list[str]) -> None:
             p1_str, status = "—", "❌"
         out.append(_fmt_row(label, p1_str, status))
     out.append("")
-    out.append("> ⚠️ raw 结果全部 0.0%，疑似评测时交互提示卡住（见 pitfalls.md）。pass1_clean 版本正常。\n")
+    out.append("> 以上为 pass1_clean 结果（strip markdown fencing）。raw 版本均 0.0%（见 pitfalls.md）。\n")
 
     # Shards progress
     ext_path = OUTPUTS / "extended_table_t0.9_status.json"
@@ -747,9 +1234,11 @@ def main() -> None:
 
     section_standalone(lines)
     section_table3_model_pairs(lines)
-    section_table4_baselines(lines)
-    section_table4_qwen_baselines(lines)
+    section_table4_all_baselines(lines)
+    section_locator_ablation(lines)
+    section_locator_fault_detection(lines)
     section_math(lines)
+    section_general_domain(lines)
     section_tau_sweep(lines)
     section_table2_extended(lines)
 

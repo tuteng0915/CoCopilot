@@ -1,27 +1,29 @@
-# src/coder/models/dream_coder.py
-from __future__ import annotations
+# src/coder/models/dream_general.py
+"""General-purpose Dream dLLM (Dream-v0-Instruct-7B, not code-specialized).
 
-import re
+Architecture is identical to DreamCoder but:
+  - Default model: Dream-org/Dream-v0-Instruct-7B
+  - No code-specific output cleaning (just strip whitespace)
+"""
+from __future__ import annotations
 
 import torch
 from transformers import AutoModel, AutoTokenizer
 
 from coder.locators.base import apply_masking_policy
 from coder.models.base import CoderModel
-from coder.utils.code_cleaning import clean_model_completion
 from coder.utils.schema import ModelRequest
 
 
-class DreamCoder(CoderModel):
+class DreamGeneral(CoderModel):
     def __init__(
         self,
-        model_id: str = "Dream-org/Dream-Coder-v0-Instruct-7B",
+        model_id: str = "Dream-org/Dream-v0-Instruct-7B",
         device: str = "cuda",
     ):
         self.model_id = model_id
         self.device = device
 
-        # Dream-Coder uses custom generation logic (diffusion_generate) via trust_remote_code.
         self.model = AutoModel.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
@@ -34,10 +36,11 @@ class DreamCoder(CoderModel):
 
     @property
     def name(self) -> str:
-        return f"dream_coder::{self.model_id}"
+        return f"dream_general::{self.model_id}"
 
     def _clean_completion(self, text: str, prompt: str) -> str:
-        return clean_model_completion(text, prompt=prompt)
+        """No code-specific cleaning — just strip surrounding whitespace."""
+        return text.strip()
 
     @torch.inference_mode()
     def score_tokens(
@@ -45,22 +48,16 @@ class DreamCoder(CoderModel):
         prompt_ids: torch.Tensor,
         comp_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Single forward pass → per-token confidence for the completion tokens.
-
-        Returns confidence[i] = P(comp_ids[0, i] | context), shape [M].
-        Uses the same left-shifted logit convention as _sample in generation_utils.py.
-        """
+        """Single forward pass → per-token confidence for completion tokens."""
         if comp_ids.shape[1] == 0:
             return torch.zeros(0, device=self.device)
 
-        full_ids = torch.cat([prompt_ids, comp_ids], dim=1)           # [1, L_p+M]
-        logits = self.model(full_ids).logits                           # [1, L_p+M, V]
-        # Same left-shift used in _sample (generation_utils.py line 413)
+        full_ids = torch.cat([prompt_ids, comp_ids], dim=1)
+        logits = self.model(full_ids).logits
         logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
-        comp_logits = logits[0, prompt_ids.shape[1]:, :].float()       # [M, V]
-        probs = torch.softmax(comp_logits, dim=-1)                     # [M, V]
-        confidence = probs[torch.arange(comp_ids.shape[1]), comp_ids[0]]  # [M]
+        comp_logits = logits[0, prompt_ids.shape[1]:, :].float()
+        probs = torch.softmax(comp_logits, dim=-1)
+        confidence = probs[torch.arange(comp_ids.shape[1]), comp_ids[0]]
         return confidence
 
     @torch.inference_mode()
@@ -74,26 +71,8 @@ class DreamCoder(CoderModel):
         span_merge_gap: int = 0,
         external_confidence: torch.Tensor | None = None,
     ) -> str:
-        """
-        Remask low-confidence tokens in `draft` and regenerate via diffusion.
-
-        Args:
-            req: ModelRequest with the original prompt and generation params.
-            draft: Raw completion string from the AR model.
-            confidence_threshold: Mask tokens where P(token) < threshold.
-            mask_ratio: Alternative — mask the bottom K% least-confident
-                tokens (0–1).  Takes precedence over confidence_threshold.
-            mask_granularity: token | span | line.
-            span_merge_gap: For span-level masking, bridge gaps of ≤ this many
-                tokens between masked positions.
-            external_confidence: Optional pre-computed confidence tensor of
-                shape [M] in the refiner's token space.  When provided,
-                score_tokens() is skipped and this tensor is used directly.
-                Masking policy and granularity are still applied here.
-        """
         mask_token_id = self.model.config.mask_token_id
 
-        # Build prompt via chat template (matches generate())
         messages = [{"role": "user", "content": req.prompt}]
         enc = self.tok.apply_chat_template(
             messages,
@@ -101,21 +80,19 @@ class DreamCoder(CoderModel):
             return_dict=True,
             add_generation_prompt=True,
         )
-        prompt_ids = enc.input_ids.to(self.device)      # [1, L_p]
+        prompt_ids = enc.input_ids.to(self.device)
         attn_mask = enc.attention_mask.to(self.device)
 
-        # Tokenize draft as plain text (no chat template, no special tokens)
         comp_enc = self.tok(draft, return_tensors="pt", add_special_tokens=False)
-        comp_ids = comp_enc.input_ids.to(self.device)   # [1, M]
+        comp_ids = comp_enc.input_ids.to(self.device)
         M = comp_ids.shape[1]
         if M == 0:
             return draft
 
-        # Score each completion token (skip if caller provides scores)
         if external_confidence is not None:
             confidence = external_confidence.to(self.device)
         else:
-            confidence = self.score_tokens(prompt_ids, comp_ids)  # [M]
+            confidence = self.score_tokens(prompt_ids, comp_ids)
 
         mask_pos = apply_masking_policy(
             confidence, confidence_threshold, mask_ratio,
@@ -123,21 +100,16 @@ class DreamCoder(CoderModel):
         )
 
         if not mask_pos.any():
-            return draft  # all tokens are confident enough — nothing to do
+            return draft
 
-        # Build partial init: high-confidence tokens stay, low-confidence → MASK
         init_comp = comp_ids.clone()
         init_comp[0, mask_pos] = mask_token_id
 
-        # Hook: at step=None (init), overwrite the generation slot with init_comp.
-        # _sample pads input_ids with MASK tokens to max_length, then calls the hook.
-        # Positions where x == mask_token_id are the only ones updated by diffusion,
-        # so pre-filled (non-MASK) positions are preserved throughout generation.
         L_p = prompt_ids.shape[1]
 
         def init_hook(step, x, logits):
             if step is None:
-                x[0, L_p : L_p + M] = init_comp[0]
+                x[0, L_p: L_p + M] = init_comp[0]
             return x
 
         if req.seed is not None:
@@ -147,13 +119,12 @@ class DreamCoder(CoderModel):
 
         dream_temp = req.temperature if (req.temperature and req.temperature > 0) else 0.1
         dream_top_p = req.top_p if (req.top_p and 0.0 < req.top_p <= 1.0) else 0.95
-        # Fewer steps than full generation since most tokens are pre-filled
         steps = max(M, 128)
 
         out = self.model.diffusion_generate(
             prompt_ids,
             attention_mask=attn_mask,
-            max_new_tokens=M,           # must equal draft length exactly
+            max_new_tokens=M,
             output_history=False,
             return_dict_in_generate=True,
             steps=steps,
@@ -174,10 +145,6 @@ class DreamCoder(CoderModel):
 
     @torch.inference_mode()
     def generate(self, req: ModelRequest) -> str:
-        """
-        Return completion text only (not the prompt).
-        """
-        # Instruct-style prompting
         messages = [{"role": "user", "content": req.prompt}]
         inputs = self.tok.apply_chat_template(
             messages,
@@ -185,7 +152,6 @@ class DreamCoder(CoderModel):
             return_dict=True,
             add_generation_prompt=True,
         )
-
         input_ids = inputs.input_ids.to(self.device)
         attention_mask = inputs.attention_mask.to(self.device)
 
@@ -194,13 +160,8 @@ class DreamCoder(CoderModel):
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(req.seed)
 
-        # Dream-Coder usually behaves better with a small non-zero temp and top-p<1.
         dream_temp = req.temperature if (req.temperature is not None and req.temperature > 0) else 0.1
         dream_top_p = req.top_p if (req.top_p is not None and 0.0 < req.top_p <= 1.0) else 0.95
-
-        # Dream diffusion steps are important; keep a sane floor.
-        # Official quickstart uses 768/768.
-        # For your course setup, this is a good compromise.
         steps = max(req.max_new_tokens, 512)
 
         out = self.model.diffusion_generate(
@@ -216,16 +177,10 @@ class DreamCoder(CoderModel):
             alg_temp=0.0,
         )
 
-        # Decode only the generated suffix (same spirit as official quick start)
         seq = out.sequences[0]
-        gen_ids = seq[len(input_ids[0]) :]
+        gen_ids = seq[len(input_ids[0]):]
         gen = self.tok.decode(gen_ids.tolist(), skip_special_tokens=False)
-
-        # Trim eos if present
         eos = self.tok.eos_token
         if eos:
             gen = gen.split(eos)[0]
-
-        # Clean prompt-echo / prose / markdown fences
-        gen = self._clean_completion(gen, req.prompt)
-        return gen
+        return self._clean_completion(gen, req.prompt)

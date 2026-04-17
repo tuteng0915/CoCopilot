@@ -11,7 +11,7 @@ from typing import Iterable, Dict, Any
 from tqdm import tqdm
 
 from coder.utils.schema import ModelRequest
-from coder.models import DeepSeekCoder, QwenCoder, CoderModel
+from coder.models import DeepSeekCoder, QwenCoder, Llama31Coder, StarCoder2Coder, CoderModel
 
 
 def read_jsonl(path: str) -> Iterable[Dict[str, Any]]:
@@ -32,6 +32,16 @@ def build_model(name: str, device: str, model_id: str | None) -> CoderModel:
     if name in ["qwen", "qwen_coder"]:
         return QwenCoder(
             model_id=model_id or "Qwen/Qwen2.5-Coder-7B-Instruct",
+            device=device,
+        )
+    if name in ["llama31", "llama31_coder", "llama3.1"]:
+        return Llama31Coder(
+            model_id=model_id or "meta-llama/Llama-3.1-8B-Instruct",
+            device=device,
+        )
+    if name in ["starcoder2", "starcoder2_coder", "sc2"]:
+        return StarCoder2Coder(
+            model_id=model_id or "bigcode/starcoder2-7b",
             device=device,
         )
     raise ValueError(f"Unsupported self-refine backbone: {name}")
@@ -190,4 +200,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -98,6 +98,32 @@ PAIR_CONFIGS: tuple[PairConfig, ...] = (
         ),
     ),
     PairConfig(
+        slug="mistral_dream_humaneval_t0.9",
+        dataset="humaneval",
+        tau_conf=0.9,
+        ar_label="Mistral 7B",
+        refiner_label="Dream-Coder 7B",
+        ar_input="outputs/base_tuteng/mistral_humaneval.jsonl",
+        ar_summary="outputs/base_tuteng/mistral_humaneval_summary.json",
+        collab_output="outputs/base_tuteng/mistral_dream_remask_humaneval_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/mistral_dream_remask_humaneval_t0.9_summary.json",
+        refiner="dream",
+        refiner_model_id="Dream-org/Dream-Coder-v0-Instruct-7B",
+    ),
+    PairConfig(
+        slug="codellama_dream_humaneval_t0.9",
+        dataset="humaneval",
+        tau_conf=0.9,
+        ar_label="CodeLlama 7B",
+        refiner_label="Dream-Coder 7B",
+        ar_input="outputs/base_tuteng/codellama_humaneval.jsonl",
+        ar_summary="outputs/base_tuteng/codellama_humaneval_summary.json",
+        collab_output="outputs/base_tuteng/codellama_dream_remask_humaneval_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/codellama_dream_remask_humaneval_t0.9_summary.json",
+        refiner="dream",
+        refiner_model_id="Dream-org/Dream-Coder-v0-Instruct-7B",
+    ),
+    PairConfig(
         slug="deepseek_llada_humaneval_t0.9",
         dataset="humaneval",
         tau_conf=0.9,
@@ -107,6 +133,97 @@ PAIR_CONFIGS: tuple[PairConfig, ...] = (
         ar_summary="outputs/base_tuteng/deepseek_humaneval_summary.json",
         collab_output="outputs/base_tuteng/deepseek_llada_remask_humaneval_t0.9.jsonl",
         collab_summary="outputs/base_tuteng/deepseek_llada_remask_humaneval_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="qwen_llada_humaneval_t0.9",
+        dataset="humaneval",
+        tau_conf=0.9,
+        ar_label="Qwen2.5-Coder 7B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/qwen_humaneval.jsonl",
+        ar_summary="outputs/base_tuteng/qwen_humaneval_summary.json",
+        collab_output="outputs/base_tuteng/qwen_llada_remask_humaneval_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/qwen_llada_remask_humaneval_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="llama31_llada_humaneval_t0.9",
+        dataset="humaneval",
+        tau_conf=0.9,
+        ar_label="Llama-3.1 8B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/llama31_humaneval.jsonl",
+        ar_summary="outputs/base_tuteng/llama31_humaneval_summary.json",
+        collab_output="outputs/base_tuteng/llama31_llada_remask_humaneval_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/llama31_llada_remask_humaneval_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="starcoder2_llada_humaneval_t0.9",
+        dataset="humaneval",
+        tau_conf=0.9,
+        ar_label="StarCoder2 7B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/starcoder2_humaneval.jsonl",
+        ar_summary="outputs/base_tuteng/starcoder2_humaneval_summary.json",
+        collab_output="outputs/base_tuteng/starcoder2_llada_remask_humaneval_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/starcoder2_llada_remask_humaneval_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="mistral_llada_humaneval_t0.9",
+        dataset="humaneval",
+        tau_conf=0.9,
+        ar_label="Mistral 7B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/mistral_humaneval.jsonl",
+        ar_summary="outputs/base_tuteng/mistral_humaneval_summary.json",
+        collab_output="outputs/base_tuteng/mistral_llada_remask_humaneval_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/mistral_llada_remask_humaneval_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="codellama_llada_humaneval_t0.9",
+        dataset="humaneval",
+        tau_conf=0.9,
+        ar_label="CodeLlama 7B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/codellama_humaneval.jsonl",
+        ar_summary="outputs/base_tuteng/codellama_humaneval_summary.json",
+        collab_output="outputs/base_tuteng/codellama_llada_remask_humaneval_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/codellama_llada_remask_humaneval_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="seed_coder_instruct_dream_humaneval_t0.9",
+        dataset="humaneval",
+        tau_conf=0.9,
+        ar_label="Seed-Coder-Instruct 8B",
+        refiner_label="Dream-Coder 7B",
+        ar_input="outputs/base_tuteng/seed-coder-instruct_humaneval.jsonl",
+        ar_summary="outputs/base_tuteng/seed-coder-instruct_humaneval_summary.json",
+        collab_output="outputs/base_tuteng/seed-coder-instruct_dream_remask_humaneval_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/seed-coder-instruct_dream_remask_humaneval_t0.9_summary.json",
+        refiner="dream",
+        refiner_model_id="Dream-org/Dream-Coder-v0-Instruct-7B",
+    ),
+    PairConfig(
+        slug="seed_coder_instruct_llada_humaneval_t0.9",
+        dataset="humaneval",
+        tau_conf=0.9,
+        ar_label="Seed-Coder-Instruct 8B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/seed-coder-instruct_humaneval.jsonl",
+        ar_summary="outputs/base_tuteng/seed-coder-instruct_humaneval_summary.json",
+        collab_output="outputs/base_tuteng/seed-coder-instruct_llada_remask_humaneval_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/seed-coder-instruct_llada_remask_humaneval_t0.9_summary.json",
         refiner="llada",
         refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
     ),
@@ -163,6 +280,136 @@ PAIR_CONFIGS: tuple[PairConfig, ...] = (
         refiner="dream",
         refiner_model_id="Dream-org/Dream-Coder-v0-Instruct-7B",
     ),
+    PairConfig(
+        slug="mistral_dream_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="Mistral 7B",
+        refiner_label="Dream-Coder 7B",
+        ar_input="outputs/base_tuteng/mistral_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/mistral_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/mistral_dream_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/mistral_dream_remask_mbpp_t0.9_summary.json",
+        refiner="dream",
+        refiner_model_id="Dream-org/Dream-Coder-v0-Instruct-7B",
+    ),
+    PairConfig(
+        slug="codellama_dream_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="CodeLlama 7B",
+        refiner_label="Dream-Coder 7B",
+        ar_input="outputs/base_tuteng/codellama_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/codellama_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/codellama_dream_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/codellama_dream_remask_mbpp_t0.9_summary.json",
+        refiner="dream",
+        refiner_model_id="Dream-org/Dream-Coder-v0-Instruct-7B",
+    ),
+    PairConfig(
+        slug="deepseek_llada_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="DeepSeek-Coder 6.7B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/deepseek_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/deepseek_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/deepseek_llada_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/deepseek_llada_remask_mbpp_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="qwen_llada_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="Qwen2.5-Coder 7B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/qwen_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/qwen_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/qwen_llada_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/qwen_llada_remask_mbpp_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="llama31_llada_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="Llama-3.1 8B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/llama31_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/llama31_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/llama31_llada_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/llama31_llada_remask_mbpp_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="starcoder2_llada_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="StarCoder2 7B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/starcoder2_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/starcoder2_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/starcoder2_llada_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/starcoder2_llada_remask_mbpp_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="mistral_llada_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="Mistral 7B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/mistral_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/mistral_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/mistral_llada_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/mistral_llada_remask_mbpp_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="codellama_llada_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="CodeLlama 7B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/codellama_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/codellama_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/codellama_llada_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/codellama_llada_remask_mbpp_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
+    PairConfig(
+        slug="seed_coder_instruct_dream_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="Seed-Coder-Instruct 8B",
+        refiner_label="Dream-Coder 7B",
+        ar_input="outputs/base_tuteng/seed-coder-instruct_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/seed-coder-instruct_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/seed-coder-instruct_dream_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/seed-coder-instruct_dream_remask_mbpp_t0.9_summary.json",
+        refiner="dream",
+        refiner_model_id="Dream-org/Dream-Coder-v0-Instruct-7B",
+    ),
+    PairConfig(
+        slug="seed_coder_instruct_llada_mbpp_t0.9",
+        dataset="mbpp",
+        tau_conf=0.9,
+        ar_label="Seed-Coder-Instruct 8B",
+        refiner_label="LLaDA 8B",
+        ar_input="outputs/base_tuteng/seed-coder-instruct_mbpp.jsonl",
+        ar_summary="outputs/base_tuteng/seed-coder-instruct_mbpp_summary.json",
+        collab_output="outputs/base_tuteng/seed-coder-instruct_llada_remask_mbpp_t0.9.jsonl",
+        collab_summary="outputs/base_tuteng/seed-coder-instruct_llada_remask_mbpp_t0.9_summary.json",
+        refiner="llada",
+        refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
+    ),
 )
 
 
@@ -205,6 +452,33 @@ def _pct(numer: int | None, denom: int | None) -> float | None:
     if numer is None or denom in (None, 0):
         return None
     return round(100.0 * numer / denom, 1)
+
+
+def _task_pass_map(eval_result_path: str | None, use_plus: bool = True) -> dict[str, bool] | None:
+    """Return {task_id: passed} from an evalplus eval_results.json file."""
+    if eval_result_path is None or not os.path.exists(eval_result_path):
+        return None
+    data = _read_json(eval_result_path)
+    key = "plus_status" if use_plus else "base_status"
+    result: dict[str, bool] = {}
+    for task_id, samples in data.get("eval", {}).items():
+        result[task_id] = any(s.get(key) == "pass" for s in samples)
+    return result
+
+
+def _compute_flip_counts(
+    ar_eval_path: str | None,
+    collab_eval_path: str | None,
+) -> dict[str, int | None]:
+    """Count wrong→right (fixed) and right→wrong (broken) tasks between AR and collab (plus%)."""
+    ar_map = _task_pass_map(ar_eval_path)
+    co_map = _task_pass_map(collab_eval_path)
+    if ar_map is None or co_map is None:
+        return {"wrong_to_right": None, "right_to_wrong": None}
+    shared = set(ar_map) & set(co_map)
+    wrong_to_right = sum(1 for t in shared if not ar_map[t] and co_map[t])
+    right_to_wrong = sum(1 for t in shared if ar_map[t] and not co_map[t])
+    return {"wrong_to_right": wrong_to_right, "right_to_wrong": right_to_wrong}
 
 
 def _summary_metrics(path: str) -> dict[str, Any] | None:
@@ -326,6 +600,13 @@ def _status_for_pair(pair: PairConfig) -> dict[str, Any]:
     collab_summary = _summary_metrics(pair.collab_summary)
     ar_summary = _summary_metrics(pair.ar_summary)
 
+    ar_sanitized_path = guess_sanitized_path(pair.ar_input)
+    ar_eval_result_path = (
+        _existing_eval_result_path(ar_sanitized_path)
+        or _existing_eval_result_path(pair.ar_input)
+    )
+    flip_counts = _compute_flip_counts(ar_eval_result_path, eval_result_path)
+
     return {
         "slug": pair.slug,
         "dataset": pair.dataset,
@@ -334,9 +615,12 @@ def _status_for_pair(pair: PairConfig) -> dict[str, Any]:
         "dllm_refiner": pair.refiner_label,
         "ar_only_pass_at_1_pct": None if ar_summary is None else ar_summary["pass_at_1_pct"],
         "collab_pass_at_1_pct": None if collab_summary is None else collab_summary["pass_at_1_pct"],
+        "wrong_to_right": flip_counts["wrong_to_right"],
+        "right_to_wrong": flip_counts["right_to_wrong"],
         "paths": {
             "ar_input": pair.ar_input,
             "ar_summary": pair.ar_summary,
+            "ar_eval_results": ar_eval_result_path,
             "collab_output": pair.collab_output,
             "collab_sanitized": sanitized_path,
             "collab_eval_results": eval_result_path,

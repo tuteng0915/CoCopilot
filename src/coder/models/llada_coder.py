@@ -5,6 +5,7 @@ import re
 import torch
 from transformers import AutoModel, AutoTokenizer
 
+from coder.locators.base import apply_masking_policy
 from coder.models.base import CoderModel
 from coder.utils.schema import ModelRequest
 
@@ -280,7 +281,16 @@ class LLaDACoder(CoderModel):
         mask_ratio: float | None = None,
         mask_granularity: str = "token",
         span_merge_gap: int = 0,
+        external_confidence: torch.Tensor | None = None,
     ) -> str:
+        """
+        Remask low-confidence tokens in `draft` and regenerate via LLaDA diffusion.
+
+        Args:
+            external_confidence: Optional pre-computed confidence tensor of
+                shape [M] in the refiner's token space.  When provided,
+                score_tokens() is skipped.  Masking policy is still applied.
+        """
         messages = [{"role": "user", "content": req.prompt}]
         prompt_text = self.tok.apply_chat_template(
             messages,
@@ -302,43 +312,15 @@ class LLaDACoder(CoderModel):
         if orig_len == 0:
             return draft
 
-        confidence = self.score_tokens(prompt_ids, comp_ids, attention_mask)
-        if mask_ratio is not None:
-            k = max(1, int(orig_len * mask_ratio))
-            threshold_val = torch.kthvalue(confidence, k).values.item()
-            mask_pos = confidence <= threshold_val
+        if external_confidence is not None:
+            confidence = external_confidence.to(self.device)
         else:
-            mask_pos = confidence < confidence_threshold
+            confidence = self.score_tokens(prompt_ids, comp_ids, attention_mask)
 
-        gran = (mask_granularity or "token").lower().strip()
-        if gran not in ("token", "span", "line"):
-            raise ValueError(f"Unsupported mask_granularity: {mask_granularity}")
-
-        if gran == "span":
-            gap = max(int(span_merge_gap), 0)
-            if gap > 0:
-                mp = mask_pos.clone()
-                idx = torch.nonzero(mp, as_tuple=False).view(-1)
-                if idx.numel() > 0:
-                    for a, b in zip(idx[:-1], idx[1:]):
-                        d = int(b.item() - a.item())
-                        if 1 < d <= gap + 1:
-                            mp[a + 1 : b] = True
-                mask_pos = mp
-        elif gran == "line":
-            line_ids = []
-            cur_line = 0
-            for tid in comp_ids[0].tolist():
-                s = self.tok.decode([tid], skip_special_tokens=False)
-                line_ids.append(cur_line)
-                cur_line += s.count("\n")
-            masked_lines = {line_ids[i] for i, masked in enumerate(mask_pos.tolist()) if masked}
-            if masked_lines:
-                mask_pos = torch.tensor(
-                    [ln in masked_lines for ln in line_ids],
-                    device=mask_pos.device,
-                    dtype=torch.bool,
-                )
+        mask_pos = apply_masking_policy(
+            confidence, confidence_threshold, mask_ratio,
+            mask_granularity, span_merge_gap, comp_ids, self.tok,
+        )
 
         if not mask_pos.any():
             return draft
