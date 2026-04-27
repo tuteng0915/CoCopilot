@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import time
 from pathlib import Path
 from typing import Iterable, Dict, Any
 
 from tqdm import tqdm
 
+from coder.utils.code_cleaning import build_evalplus_solution
 from coder.utils.schema import ModelRequest
 from coder.models import DeepSeekCoder, QwenCoder, Llama31Coder, StarCoder2Coder, CoderModel
 
@@ -45,14 +45,6 @@ def build_model(name: str, device: str, model_id: str | None) -> CoderModel:
             device=device,
         )
     raise ValueError(f"Unsupported self-refine backbone: {name}")
-
-
-def build_evalplus_solution(prompt_text: str, gen: str) -> str:
-    """Same logic as in gen_remask.py, reused for EvalPlus samples."""
-    g = (gen or "").lstrip()
-    if re.search(r"(?m)^(def|class|import|from)\s+", g):
-        return g.rstrip()
-    return (prompt_text.rstrip() + "\n" + gen.lstrip()).rstrip()
 
 
 def main() -> None:

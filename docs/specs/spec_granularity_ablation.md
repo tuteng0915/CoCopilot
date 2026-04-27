@@ -18,6 +18,34 @@ Rewriter（Dream-Coder 7B），只改 `--mask_granularity`。
 
 ---
 
+## 当前进度（2026-04-22）
+
+已完成并评测：
+
+- `span + HumanEval`
+  - raw: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span.jsonl`
+  - summary: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span_summary.json`
+  - 结果：HE+ plus = `65.2%`, HE+ base = `70.7%`
+- `span + MBPP`
+  - raw: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span.jsonl`
+  - summary: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span_summary.json`
+  - 结果：MBPP+ plus = `69.0%`, MBPP+ base = `80.2%`
+- `line + HumanEval`
+  - raw: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line.jsonl`
+  - summary: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line_summary.json`
+  - 结果：HE+ plus = `45.7%`, HE+ base = `51.2%`
+
+尚未完成：
+
+- `line + MBPP`
+  - 还未生成：`outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line.jsonl` 当前不存在
+  - 原因：最近几次执行时没有空闲 GPU
+
+注意：本 spec 里的 `postprocess_evalplus` / `eval_evalplus` CLI 已在代码中更新。
+下面的命令块已经按当前脚本接口修正为 `--dataset --samples` / `--output_file`。
+
+---
+
 ## 环境准备
 
 ```bash
@@ -50,6 +78,8 @@ mkdir -p outputs/ablation_granularity
 
 `span_merge_gap=2`：合并间距 ≤ 2 个 token 的 mask 片段（推荐值，平衡连续性与过度扩展）。
 
+> 状态：已完成，无需重跑。
+
 ```bash
 python -m coder.scripts.gen_remask \
   --input  outputs/base_tuteng/deepseek_humaneval.jsonl \
@@ -69,6 +99,8 @@ print(f'records: {len(lines)}  (expected 164)')
 ```
 
 ### 2b. Span Granularity — MBPP
+
+> 状态：已完成，无需重跑。
 
 ```bash
 python -m coder.scripts.gen_remask \
@@ -90,6 +122,8 @@ print(f'records: {len(lines)}  (expected 378)')
 
 ### 2c. Line Granularity — HumanEval
 
+> 状态：已完成，无需重跑。
+
 ```bash
 python -m coder.scripts.gen_remask \
   --input  outputs/base_tuteng/deepseek_humaneval.jsonl \
@@ -109,6 +143,8 @@ print(f'records: {len(lines)}  (expected 164)')
 
 ### 2d. Line Granularity — MBPP
 
+> 状态：待执行。这是当前唯一剩余的生成任务。
+
 ```bash
 python -m coder.scripts.gen_remask \
   --input  outputs/base_tuteng/deepseek_mbpp.jsonl \
@@ -116,7 +152,8 @@ python -m coder.scripts.gen_remask \
   --locator dream \
   --confidence_threshold 0.9 \
   --mask_granularity line \
-  --temperature 0.1 --top_p 0.95 --seed 3407
+  --temperature 0.1 --top_p 0.95 --seed 3407 \
+  --resume
 
 # 验证（期望 378 行）
 python3 -c "
@@ -133,35 +170,59 @@ print(f'records: {len(lines)}  (expected 378)')
 ```bash
 # span — HumanEval
 python -m coder.scripts.postprocess_evalplus \
-  --input outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span.jsonl
+  --dataset humaneval \
+  --samples outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span.jsonl
 
 python -m coder.scripts.eval_evalplus \
+  --dataset humaneval \
   --samples outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span-sanitized.jsonl \
-  --out_eval outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span-sanitized_eval_results.json
+  --backend local \
+  --parallel 16 \
+  --output_file outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span-sanitized_eval_results.json \
+  --summary_out outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span_summary.json \
+  --summary_model deepseek_dream_humaneval_t0.9_gran_span
 
 # span — MBPP
 python -m coder.scripts.postprocess_evalplus \
-  --input outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span.jsonl
+  --dataset mbpp \
+  --samples outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span.jsonl
 
 python -m coder.scripts.eval_evalplus \
+  --dataset mbpp \
   --samples outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span-sanitized.jsonl \
-  --out_eval outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span-sanitized_eval_results.json
+  --backend local \
+  --parallel 16 \
+  --output_file outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span-sanitized_eval_results.json \
+  --summary_out outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span_summary.json \
+  --summary_model deepseek_dream_mbpp_t0.9_gran_span
 
 # line — HumanEval
 python -m coder.scripts.postprocess_evalplus \
-  --input outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line.jsonl
+  --dataset humaneval \
+  --samples outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line.jsonl
 
 python -m coder.scripts.eval_evalplus \
+  --dataset humaneval \
   --samples outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line-sanitized.jsonl \
-  --out_eval outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line-sanitized_eval_results.json
+  --backend local \
+  --parallel 16 \
+  --output_file outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line-sanitized_eval_results.json \
+  --summary_out outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line_summary.json \
+  --summary_model deepseek_dream_humaneval_t0.9_gran_line
 
 # line — MBPP
 python -m coder.scripts.postprocess_evalplus \
-  --input outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line.jsonl
+  --dataset mbpp \
+  --samples outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line.jsonl
 
 python -m coder.scripts.eval_evalplus \
+  --dataset mbpp \
   --samples outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line-sanitized.jsonl \
-  --out_eval outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line-sanitized_eval_results.json
+  --backend local \
+  --parallel 16 \
+  --output_file outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line-sanitized_eval_results.json \
+  --summary_out outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line_summary.json \
+  --summary_model deepseek_dream_mbpp_t0.9_gran_line
 ```
 
 ---
@@ -172,22 +233,27 @@ python -m coder.scripts.eval_evalplus \
 python3 -c "
 import json
 
-# token baseline（已有产物）
-def read_eval(path):
+# 读取 wrapper summary（n_both_pass / n_base_pass）
+def read_summary(path):
     try:
         d = json.load(open(path))
         s = d.get('summary', {})
-        return s.get('plus', '?'), s.get('base', '?')
+        n = s.get('n_tasks', 0)
+        if not n:
+            return 'MISSING', 'MISSING'
+        plus = f\"{s['n_both_pass'] / n * 100:.1f}%\"
+        base = f\"{s['n_base_pass'] / n * 100:.1f}%\"
+        return plus, base
     except FileNotFoundError:
         return 'MISSING', 'MISSING'
 
 # token baseline：来自 results.md Table 3（已知，无需重读文件）
 he_tok  = ('72.6%', '78.7%')
 mb_tok  = ('70.1%', '80.4%')
-he_span = read_eval('outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span-sanitized_eval_results.json')
-mb_span = read_eval('outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span-sanitized_eval_results.json')
-he_line = read_eval('outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line-sanitized_eval_results.json')
-mb_line = read_eval('outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line-sanitized_eval_results.json')
+he_span = read_summary('outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span_summary.json')
+mb_span = read_summary('outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span_summary.json')
+he_line = read_summary('outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line_summary.json')
+mb_line = read_summary('outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line_summary.json')
 
 print('Granularity  | HE+ plus  HE+ base  | MBPP+ plus  MBPP+ base')
 print(f'token        | {he_tok[0]:>8}  {he_tok[1]:>8}  | {mb_tok[0]:>10}  {mb_tok[1]:>10}')
@@ -200,12 +266,21 @@ print(f'line         | {he_line[0]:>8}  {he_line[1]:>8}  | {mb_line[0]:>10}  {mb
 
 ## 完成判定
 
-- [ ] span HumanEval 生成完毕（164 行）
-- [ ] span MBPP 生成完毕（378 行）
-- [ ] line HumanEval 生成完毕（164 行）
+- [x] span HumanEval 生成完毕（164 行）
+- [x] span MBPP 生成完毕（378 行）
+- [x] line HumanEval 生成完毕（164 行）
 - [ ] line MBPP 生成完毕（378 行）
 - [ ] 4 个产物均通过 postprocess + eval_evalplus
 - [ ] 结果填入 `docs/results.md` 的 Locator 消融 / 粒度消融表
+
+## 恢复执行顺序
+
+当有空闲 GPU 后，从这里继续：
+
+1. 跑 `2d. Line Granularity — MBPP`
+2. 跑 `line — MBPP` 的 postprocess + eval
+3. 执行上面的“结果读取”脚本，确认四行齐全
+4. 把结果补进 `docs/results.md` 的粒度消融表
 
 ## 显存估算
 

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -40,6 +39,7 @@ from coder.models import (
     CoderModel,
 )
 from coder.utils.schema import ModelRequest
+from coder.utils.code_cleaning import build_evalplus_solution
 
 
 def read_jsonl(path: str) -> Iterable[Dict[str, Any]]:
@@ -94,13 +94,6 @@ def build_model(name: str, device: str, model_id: Optional[str]) -> CoderModel:
     if name in ["api", "api_coder", "closed_api"]:
         return ApiCoder(model_id=model_id, device="api")
     raise ValueError(f"Unknown --model: {name}")
-
-
-def build_evalplus_solution(prompt_text: str, gen: str) -> str:
-    g = (gen or "").lstrip()
-    if re.search(r"(?m)^(def|class|import|from)\s+", g):
-        return g.rstrip()
-    return (prompt_text.rstrip() + "\n" + gen.lstrip()).rstrip()
 
 
 def get_nested(obj: Dict[str, Any], dotted_key: str) -> Any:

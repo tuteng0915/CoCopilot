@@ -74,6 +74,45 @@ CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math ... --num_shards 2 --sha
 CUDA_VISIBLE_DEVICES=1 python -m coder.scripts.gen_math ... --num_shards 2 --shard_idx 1 &
 ```
 
+### Math-to-Code（实验性）
+
+当直接数学 CoT 的 locator 信号太弱时，可切到 code mode：先让 AR 模型生成 `solution()`，再走 remask，最后执行代码评测。
+
+```bash
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate code
+cd /model/tteng/CoCoder
+export PYTHONPATH="/model/tteng/CoCoder/src:${PYTHONPATH:-}"
+```
+
+生成 code-mode 草稿：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
+  --model deepseek \
+  --dataset gsm8k \
+  --out outputs/math_code/deepseek_gsm8k_code.jsonl \
+  --max_new_tokens 512
+```
+
+对 code-mode JSONL 做 remask（`gen_remask` 会保留 `code_mode`）：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -m coder.scripts.gen_remask \
+  --input outputs/math_code/deepseek_gsm8k_code.jsonl \
+  --refiner dream \
+  --confidence_threshold 0.9 \
+  --out outputs/math_code/deepseek_gsm8k_code_dream_t0.9.jsonl
+```
+
+执行代码并评测：
+
+```bash
+python -m coder.scripts.eval_math_code \
+  --input outputs/math_code/deepseek_gsm8k_code_dream_t0.9.jsonl \
+  --out outputs/math_code/deepseek_gsm8k_code_dream_t0.9_eval.json
+```
+
 ## EvalPlus（HumanEval / MBPP）
 
 典型 pipeline（以 `MODEL=deepseek`、`DATASET=humaneval` 为例）：
@@ -198,4 +237,3 @@ python -m coder.scripts.eval_bigcodebench --samples outputs/base_tuteng/qwen_big
   --split instruct --subset full --execution local \
   --out_summary outputs/base_tuteng/qwen_bigcodebench_instruct_full_summary.json
 ```
-

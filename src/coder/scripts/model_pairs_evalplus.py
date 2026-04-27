@@ -207,10 +207,10 @@ PAIR_CONFIGS: tuple[PairConfig, ...] = (
         tau_conf=0.9,
         ar_label="Seed-Coder-Instruct 8B",
         refiner_label="Dream-Coder 7B",
-        ar_input="outputs/base_tuteng/seed-coder-instruct_humaneval.jsonl",
-        ar_summary="outputs/base_tuteng/seed-coder-instruct_humaneval_summary.json",
-        collab_output="outputs/base_tuteng/seed-coder-instruct_dream_remask_humaneval_t0.9.jsonl",
-        collab_summary="outputs/base_tuteng/seed-coder-instruct_dream_remask_humaneval_t0.9_summary.json",
+        ar_input="outputs/base_tuteng/packaging_v2/seed-coder-instruct_humaneval_pkgv2.jsonl",
+        ar_summary="outputs/base_tuteng/packaging_v2/seed-coder-instruct_humaneval_pkgv2_summary.json",
+        collab_output="outputs/base_tuteng/packaging_v2/seed-coder-instruct_dream_remask_humaneval_t0.9_pkgv2.jsonl",
+        collab_summary="outputs/base_tuteng/packaging_v2/seed-coder-instruct_dream_remask_humaneval_t0.9_pkgv2_summary.json",
         refiner="dream",
         refiner_model_id="Dream-org/Dream-Coder-v0-Instruct-7B",
     ),
@@ -220,10 +220,10 @@ PAIR_CONFIGS: tuple[PairConfig, ...] = (
         tau_conf=0.9,
         ar_label="Seed-Coder-Instruct 8B",
         refiner_label="LLaDA 8B",
-        ar_input="outputs/base_tuteng/seed-coder-instruct_humaneval.jsonl",
-        ar_summary="outputs/base_tuteng/seed-coder-instruct_humaneval_summary.json",
-        collab_output="outputs/base_tuteng/seed-coder-instruct_llada_remask_humaneval_t0.9.jsonl",
-        collab_summary="outputs/base_tuteng/seed-coder-instruct_llada_remask_humaneval_t0.9_summary.json",
+        ar_input="outputs/base_tuteng/packaging_v2/seed-coder-instruct_humaneval_pkgv2.jsonl",
+        ar_summary="outputs/base_tuteng/packaging_v2/seed-coder-instruct_humaneval_pkgv2_summary.json",
+        collab_output="outputs/base_tuteng/packaging_v2/seed-coder-instruct_llada_remask_humaneval_t0.9_pkgv2.jsonl",
+        collab_summary="outputs/base_tuteng/packaging_v2/seed-coder-instruct_llada_remask_humaneval_t0.9_pkgv2_summary.json",
         refiner="llada",
         refiner_model_id="GSAI-ML/LLaDA-8B-Instruct",
     ),
@@ -596,7 +596,10 @@ def _status_for_pair(pair: PairConfig) -> dict[str, Any]:
         missing_ids = [task_id for task_id in expected_ids if task_id not in set(task_ids)]
 
     sanitized_path = guess_sanitized_path(pair.collab_output)
-    eval_result_path = _existing_eval_result_path(sanitized_path)
+    eval_result_path = (
+        _existing_eval_result_path(sanitized_path)
+        or _existing_eval_result_path(pair.collab_output)
+    )
     collab_summary = _summary_metrics(pair.collab_summary)
     ar_summary = _summary_metrics(pair.ar_summary)
 
@@ -639,7 +642,6 @@ def _status_for_pair(pair: PairConfig) -> dict[str, Any]:
             "summary_exists": os.path.exists(pair.collab_summary),
             "is_fully_complete": (
                 collab_unique_rows == len(expected_set)
-                and os.path.exists(sanitized_path)
                 and eval_result_path is not None
                 and os.path.exists(pair.collab_summary)
             ),

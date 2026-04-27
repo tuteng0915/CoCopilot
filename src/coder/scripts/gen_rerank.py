@@ -13,6 +13,10 @@ from tqdm import tqdm
 from evalplus.data import get_human_eval_plus, get_mbpp_plus
 
 from coder.utils.schema import ModelRequest
+from coder.utils.code_cleaning import (
+    build_evalplus_solution as _build_evalplus_solution,
+    clean_model_completion as _clean_model_completion,
+)
 from coder.models import DeepSeekCoder, QwenCoder, Llama31Coder, StarCoder2Coder, CoderModel
 from coder.analysis.logprob import score_completion_logprob
 
@@ -67,37 +71,11 @@ def select_tasks(
 
 
 def clean_model_completion(text: str, prompt: str | None = None) -> str:
-    if not text:
-        return ""
-
-    s = text.strip()
-
-    fence_blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", s, flags=re.S | re.I)
-    if fence_blocks:
-        s = fence_blocks[-1].strip()
-
-    s = s.replace("```python", "").replace("```", "").strip()
-
-    if prompt:
-        p = prompt.strip()
-        if p and s.startswith(p):
-            s = s[len(p) :].lstrip()
-
-    s = re.sub(r"^\s*(assistant|response)\s*:\s*", "", s, flags=re.I)
-
-    m = re.search(r"(?m)^(def|class|import|from|@)\s+", s)
-    if m:
-        s = s[m.start() :].lstrip()
-
-    return s.strip()
+    return _clean_model_completion(text, prompt=prompt)
 
 
 def build_evalplus_solution(prob: dict, gen: str) -> str:
-    g = (gen or "").lstrip()
-    prompt = prob["prompt"].rstrip()
-    if re.search(r"(?m)^(def|class|import|from)\s+", g):
-        return g.rstrip()
-    return (prompt + "\n" + gen.lstrip()).rstrip()
+    return _build_evalplus_solution(prob["prompt"], gen)
 
 
 def score_candidate(code: str) -> float:
@@ -185,6 +163,7 @@ def main() -> None:
     ap.add_argument("--task_ids", type=str, default=None)
     ap.add_argument("--shuffle", action="store_true")
     ap.add_argument("--seed", type=int, default=3407)
+    ap.add_argument("--resume", action="store_true")
 
     ap.add_argument("--max_new_tokens", type=int, default=512)
     ap.add_argument("--temperature", type=float, default=0.7)
@@ -218,6 +197,20 @@ def main() -> None:
         seed=args.seed,
     )
 
+    done_task_ids: set[str] = set()
+    if args.resume and os.path.exists(args.out):
+        with open(args.out, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                task_id = rec.get("task_id")
+                if task_id:
+                    done_task_ids.add(task_id)
+        selected = [(tid, prob) for tid, prob in selected if tid not in done_task_ids]
+        if done_task_ids:
+            print(f"[resume] skipping {len(done_task_ids)} already-done tasks.")
+
     model = build_model(args.model, device=args.device, model_id=args.model_id)
 
     t_total0 = time.perf_counter()
@@ -228,7 +221,8 @@ def main() -> None:
     n_records_written = 0
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as f:
+    mode = "a" if args.resume else "w"
+    with open(args.out, mode, encoding="utf-8") as f:
         for task_id, prob in tqdm(selected, desc=f"gen_rerank:{args.model}:{args.dataset}"):
             prompt = (
                 "Complete the following Python function. "

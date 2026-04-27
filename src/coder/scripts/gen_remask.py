@@ -23,7 +23,7 @@ Output JSONL (LiveBench):
 
 Output JSONL (Math):
   id, sample_id, question, prompt, answer_ref, dataset, draft_completion, raw_completion, model, gen
-  (subject, level preserved for MATH-500; compatible with eval_math.py)
+  (subject, level, code_mode preserved when present; compatible with eval_math.py / eval_math_code.py)
 """
 from __future__ import annotations
 
@@ -46,58 +46,12 @@ from coder.locators import (
 )
 from coder.models import DreamCoder, LLaDACoder, DreamGeneral
 from coder.utils.code_cleaning import (
+    build_evalplus_solution,
     build_prompt_scaffold_solution,
     clean_model_completion,
-    indent_as_body,
 )
 from coder.utils.schema import ModelRequest
 from coder.utils.sharding import take_shard, validate_shard_args
-
-
-def build_evalplus_solution(prompt_text: str, gen: str) -> str:
-    """Build a full EvalPlus-compatible solution string from a prompt + completion."""
-    g = clean_model_completion(gen, prompt_text).lstrip()
-    prompt = prompt_text.rstrip()
-
-    def extract_prompt_imports(p: str) -> str:
-        imports = []
-        for line in p.splitlines():
-            s = line.strip()
-            if s.startswith("from ") or s.startswith("import "):
-                imports.append(line.rstrip())
-                continue
-            if s.startswith("def ") or s.startswith("class "):
-                break
-        return "\n".join(imports).strip()
-
-    def infer_target_func_name(p: str) -> str | None:
-        m = re.search(r"(?m)^\s*def\s+([A-Za-z_]\w*)\s*\(", p)
-        return m.group(1) if m else None
-
-    def extract_single_function(src: str, func_name: str) -> str | None:
-        pattern = (
-            rf"(?ms)^(?P<decor>(?:@\w[^\n]*\n)*)"
-            rf"(?P<def>def\s+{re.escape(func_name)}\s*\(.*?)(?=^\s*(?:def|class)\s+|\Z)"
-        )
-        m = re.search(pattern, src)
-        if not m:
-            return None
-        return (m.group("decor") + m.group("def")).strip()
-
-    if re.search(r"(?m)^(def|class|import|from)\s+", g):
-        target_name = infer_target_func_name(prompt)
-        if target_name:
-            extracted = extract_single_function(g, target_name)
-            g2 = extracted if extracted else g.rstrip()
-        else:
-            g2 = g.rstrip()
-
-        imports = extract_prompt_imports(prompt)
-        if imports and imports not in g2:
-            g2 = (imports + "\n\n" + g2).rstrip()
-        return g2.rstrip()
-
-    return (prompt + "\n" + indent_as_body(g.lstrip())).rstrip()
 
 
 def read_jsonl(path: str):
@@ -252,6 +206,80 @@ def compute_refiner_mask_plan(
     return confidence, mask_pos, stats
 
 
+def summarize_mask_spans(
+    draft: str,
+    tokenizer,
+    mask_pos: torch.BoolTensor | None,
+    max_spans: int,
+    context_chars: int,
+) -> dict:
+    if mask_pos is None:
+        return {"mask_char_spans": [], "mask_span_count": 0, "mask_char_coverage": 0}
+
+    spans = get_token_char_spans(tokenizer, draft)
+    mask_flags = mask_pos.detach().cpu().bool().tolist()
+    n = min(len(spans), len(mask_flags))
+    merged: list[tuple[int, int, int, int]] = []
+    cur_start: int | None = None
+    cur_end: int | None = None
+    cur_tok_start: int | None = None
+    cur_tok_end: int | None = None
+
+    for idx in range(n):
+        if not mask_flags[idx]:
+            if cur_start is not None and cur_end is not None and cur_tok_start is not None and cur_tok_end is not None:
+                merged.append((cur_start, cur_end, cur_tok_start, cur_tok_end))
+            cur_start = cur_end = cur_tok_start = cur_tok_end = None
+            continue
+
+        start, end = spans[idx]
+        if cur_start is None:
+            cur_start = max(0, min(int(start), len(draft)))
+            cur_end = max(cur_start, min(int(end), len(draft)))
+            cur_tok_start = idx
+            cur_tok_end = idx + 1
+        else:
+            cur_end = max(cur_end or 0, min(int(end), len(draft)))
+            cur_tok_end = idx + 1
+
+    if cur_start is not None and cur_end is not None and cur_tok_start is not None and cur_tok_end is not None:
+        merged.append((cur_start, cur_end, cur_tok_start, cur_tok_end))
+
+    def line_col(pos: int) -> tuple[int, int]:
+        pos = max(0, min(pos, len(draft)))
+        line = draft.count("\n", 0, pos) + 1
+        line_start = draft.rfind("\n", 0, pos)
+        col = pos + 1 if line_start == -1 else pos - line_start
+        return line, col
+
+    out_spans = []
+    context = max(int(context_chars), 0)
+    for start, end, tok_start, tok_end in merged[: max(int(max_spans), 0)]:
+        line_start, col_start = line_col(start)
+        line_end, col_end = line_col(end)
+        ctx_start = max(0, start - context)
+        ctx_end = min(len(draft), end + context)
+        out_spans.append({
+            "char_start": start,
+            "char_end": end,
+            "token_start": tok_start,
+            "token_end": tok_end,
+            "line_start": line_start,
+            "line_end": line_end,
+            "col_start": col_start,
+            "col_end": col_end,
+            "text": draft[start:end],
+            "context": draft[ctx_start:ctx_end],
+        })
+
+    return {
+        "mask_char_spans": out_spans,
+        "mask_span_count": len(merged),
+        "mask_char_coverage": sum(max(0, end - start) for start, end, _, _ in merged),
+        "mask_span_truncated": len(merged) > len(out_spans),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Refine AR drafts with a diffusion refiner via confidence-based remasking."
@@ -332,6 +360,23 @@ def main() -> None:
         "--record_mask_stats",
         action="store_true",
         help="Record planned mask counts, mask fraction, and confidence stats in gen metadata.",
+    )
+    ap.add_argument(
+        "--record_mask_spans",
+        action="store_true",
+        help="Record planned mask character spans in gen metadata for locator case studies.",
+    )
+    ap.add_argument(
+        "--max_recorded_mask_spans",
+        type=int,
+        default=20,
+        help="Maximum number of mask spans to store when --record_mask_spans is enabled.",
+    )
+    ap.add_argument(
+        "--mask_span_context_chars",
+        type=int,
+        default=40,
+        help="Number of context characters around each recorded mask span.",
     )
 
     # Diffusion generation params for the refinement step
@@ -490,11 +535,13 @@ def main() -> None:
 
                 should_plan_masks = (
                     args.record_mask_stats
+                    or args.record_mask_spans
                     or args.gate_min_mask_fraction is not None
                     or args.gate_max_mask_fraction is not None
                 )
+                mask_pos: torch.BoolTensor | None = None
                 if should_plan_masks and draft:
-                    ext_conf, _mask_pos, mask_stats = compute_refiner_mask_plan(
+                    ext_conf, mask_pos, mask_stats = compute_refiner_mask_plan(
                         model=model,
                         refiner_name=refiner_name,
                         req=req,
@@ -518,6 +565,14 @@ def main() -> None:
                     ):
                         skip_refine = True
                         skip_reason = "mask_fraction_above_max"
+                    if args.record_mask_spans:
+                        mask_stats.update(summarize_mask_spans(
+                            draft=draft,
+                            tokenizer=model.tok,
+                            mask_pos=mask_pos,
+                            max_spans=args.max_recorded_mask_spans,
+                            context_chars=args.mask_span_context_chars,
+                        ))
 
                 if skip_refine:
                     refined = draft
@@ -553,8 +608,6 @@ def main() -> None:
                     solution = refined
                 elif benchmark == "bigcodebench":
                     solution = build_prompt_scaffold_solution(prompt_text, refined)
-                elif skip_refine and rec.get("solution"):
-                    solution = rec["solution"]
                 else:
                     solution = build_evalplus_solution(prompt_text, refined)
             t_pack1 = time.perf_counter()
@@ -588,6 +641,8 @@ def main() -> None:
                 gen_meta.update(mask_stats)
 
             if id_mode:
+                # Preserve any extra math/research/writing metadata from the input schema,
+                # including code_mode for math-to-code runs.
                 out_rec = dict(rec)
                 out_rec.update({
                     "id":               rec_id,

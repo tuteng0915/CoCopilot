@@ -18,6 +18,7 @@ REMASK_KODAI = REPO_ROOT / "outputs" / "remask_kodai"
 ABLATION_LOCATOR = REPO_ROOT / "outputs" / "ablation_locator"
 RESEARCH_OUT = REPO_ROOT / "outputs" / "research"
 WRITING_OUT = REPO_ROOT / "outputs" / "writing"
+MATH_CODE_OUT = REPO_ROOT / "outputs" / "math_code"
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,50 @@ def _resolve(fname: str | None, base: Path = OUTPUTS) -> Path | None:
     return base / fname
 
 
+def _is_pass(status: Any) -> bool:
+    return isinstance(status, str) and status.lower() == "pass"
+
+
+def _dedup_evalplus_counts(summary_data: dict[str, Any]) -> dict[str, int | None] | None:
+    """Recompute pass@1 counts when an EvalPlus result has duplicate task rows."""
+    source_eval_file = summary_data.get("source_eval_file")
+    if not source_eval_file:
+        return None
+
+    eval_data = _load_json(Path(source_eval_file))
+    eval_map = (eval_data or {}).get("eval") or {}
+    if not eval_map:
+        return None
+
+    n_tasks = 0
+    n_samples_total = 0
+    n_base_pass = 0
+    n_plus_pass = 0
+    plus_seen = False
+
+    for rows in eval_map.values():
+        n_tasks += 1
+        rows = rows or []
+        n_samples_total += len(rows)
+        if not rows:
+            continue
+
+        # These tables are pass@1. Duplicate rows are merge artifacts, so use
+        # the first evaluated sample for each task instead of counting all rows.
+        first = rows[0]
+        n_base_pass += int(_is_pass(first.get("base_status")))
+        if first.get("plus_status") is not None:
+            plus_seen = True
+            n_plus_pass += int(_is_pass(first.get("plus_status")))
+
+    return {
+        "n_tasks": n_tasks,
+        "n_samples_total": n_samples_total,
+        "n_base_pass": n_base_pass,
+        "n_plus_pass": n_plus_pass if plus_seen else None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
@@ -57,6 +102,12 @@ def _load_evalplus_summary(path: Path | None) -> dict[str, Any] | None:
     n_base = s.get("n_base_pass")
     if n_tasks is None:
         return None
+    if s.get("n_samples_total") and s.get("n_samples_total") != n_tasks:
+        dedup = _dedup_evalplus_counts(data)
+        if dedup is not None:
+            n_tasks = dedup["n_tasks"]
+            n_plus = dedup["n_plus_pass"]
+            n_base = dedup["n_base_pass"]
     return {
         "n_tasks": n_tasks,
         "plus_pct": round(100.0 * n_plus / n_tasks, 1) if n_plus is not None else None,
@@ -104,6 +155,9 @@ def _load_bigcodebench(fname: str) -> dict[str, Any] | None:
     if p1 is None:
         # try nested summary (sample100 format)
         p1 = (data.get("summary") or {}).get("pass@1")
+    if p1 is None:
+        # sample100 BigCodeBench summaries store the metric under pass_at_k.
+        p1 = (data.get("pass_at_k") or {}).get("pass@1")
     return {"pass1": p1, "calibrated": data.get("calibrated", "")}
 
 
@@ -230,7 +284,7 @@ _STANDALONE_ENTRIES = [
     ),
     (
         "Seed-Coder-Instruct 8B",
-        "seed-coder-instruct_humaneval_summary.json",
+        "packaging_v2/seed-coder-instruct_humaneval_pkgv2_summary.json",
         "seed-coder-instruct_mbpp_summary.json",
         None,
         None,
@@ -380,6 +434,7 @@ def section_table3_model_pairs(out: list[str]) -> None:
         "humaneval": 164,
         "mbpp": 378,
     }
+    _PAIR_RESULT_OVERRIDES: dict[str, dict[str, Any]] = {}
 
     # Build AR timing lookup: label → {"humaneval": t_he, "mbpp": t_mbpp}
     _n_he, _n_mb = 164, 378
@@ -395,10 +450,11 @@ def section_table3_model_pairs(out: list[str]) -> None:
         ar = row.get("ar_drafter", "?")
         dllm = row.get("dllm_refiner", "?")
         slug = row.get("slug", "")
-        ar_pct = row.get("ar_only_pass_at_1_pct")
-        collab_pct = row.get("collab_pass_at_1_pct")
-        wrong_to_right = row.get("wrong_to_right")
-        right_to_wrong = row.get("right_to_wrong")
+        override = _PAIR_RESULT_OVERRIDES.get(slug, {})
+        ar_pct = override.get("ar_only_pass_at_1_pct", row.get("ar_only_pass_at_1_pct"))
+        collab_pct = override.get("collab_pass_at_1_pct", row.get("collab_pass_at_1_pct"))
+        wrong_to_right = override.get("wrong_to_right", row.get("wrong_to_right"))
+        right_to_wrong = override.get("right_to_wrong", row.get("right_to_wrong"))
         cs = row.get("collab_status", {})
         is_complete = cs.get("is_fully_complete", False)
         is_gen = cs.get("is_generation_complete", False)
@@ -455,7 +511,8 @@ _BASELINE_ENTRIES = [
         "DeepSeek baseline",
         "deepseek_humaneval_summary.json",
         "deepseek_mbpp_summary.json",
-        None, None,  # gen_evalplus no timing
+        "deepseek_humaneval_timed.jsonl.timing_summary.json",
+        "deepseek_mbpp_timed.jsonl.timing_summary.json",
     ),
     (
         "+ Self-Refine",
@@ -504,6 +561,7 @@ _BASELINE_ENTRIES = [
 
 def section_table4_all_baselines(out: list[str]) -> None:
     out.append("## Table 4 — AR Model Baselines（pass@1 plus%）\n")
+    out.append("> 本表使用已有 EvalPlus sanitized 评测产物。\n")
     headers = [
         "AR 模型", "方法",
         "HE+ plus%", "HE+ base%",
@@ -543,6 +601,7 @@ def section_table4_all_baselines(out: list[str]) -> None:
             ))
     out.append("")
     out.append("> s/sample = 方法总耗时 / 题目数。DeepSeek baseline timing 来自 `_timed` 重跑产物。\n")
+    out.append("> 若 EvalPlus 结果中同一 task 出现重复样本，本表按 pass@1 口径只计每个 task 的第一条样本；这修正了 Llama-3.1/StarCoder2 Locate-AR-Rewrite HumanEval 的 merge duplicate artifact。\n")
 
 
 # ---------------------------------------------------------------------------
@@ -754,6 +813,7 @@ _LLAMA31_BASELINE_ENTRIES = [
 
 def section_table4_llama31_baselines(out: list[str]) -> None:
     out.append("## Table 4c — Llama-3.1 8B Baselines（pass@1 plus%）\n")
+    out.append("> 使用已有 EvalPlus sanitized 评测产物；Locate-AR-Rewrite HumanEval 行按每个 task 第一条样本去重后汇总。\n")
     headers = [
         "方法",
         "HE+ plus%", "HE+ base%",
@@ -843,6 +903,7 @@ _STARCODER2_BASELINE_ENTRIES = [
 
 def section_table4_starcoder2_baselines(out: list[str]) -> None:
     out.append("## Table 4d — StarCoder2 7B Baselines（pass@1 plus%）\n")
+    out.append("> 使用已有 EvalPlus sanitized 评测产物；Locate-AR-Rewrite HumanEval 行按每个 task 第一条样本去重后汇总。\n")
     headers = [
         "方法",
         "HE+ plus%", "HE+ base%",
@@ -1027,6 +1088,110 @@ def section_math(out: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Section: Math Benchmarks — Code-Execution Mode（GSM8K / MATH-500 / AIME）
+# ---------------------------------------------------------------------------
+
+# (label, gsm8k_f, math500_f, aime_f, aime2025_f)
+_MATH_CODE_ENTRIES = [
+    ("DeepSeek-Coder 6.7B",
+     "deepseek_gsm8k_code_eval.json",   "deepseek_math500_code_eval.json",
+     "deepseek_aime_code_eval.json",     "deepseek_aime2025_code_eval.json"),
+    ("Qwen2.5-Coder 7B",
+     "qwen_gsm8k_code_eval.json",        "qwen_math500_code_eval.json",
+     "qwen_aime_code_eval.json",         "qwen_aime2025_code_eval.json"),
+    ("Llama-3.1 8B",
+     "llama31_gsm8k_code_eval.json",     "llama31_math500_code_eval.json",
+     "llama31_aime_code_eval.json",      "llama31_aime2025_code_eval.json"),
+]
+
+_MATH_CODE_COLLAB_ENTRIES = [
+    ("DeepSeek-Coder + Dream",
+     "deepseek_gsm8k_code_dream_t0.9_eval.json",   "deepseek_math500_code_dream_t0.9_eval.json",
+     "deepseek_aime_code_dream_t0.9_eval.json",     "deepseek_aime2025_code_dream_t0.9_eval.json"),
+    ("Qwen2.5-Coder + Dream",
+     "qwen_gsm8k_code_dream_t0.9_eval.json",        "qwen_math500_code_dream_t0.9_eval.json",
+     "qwen_aime_code_dream_t0.9_eval.json",         "qwen_aime2025_code_dream_t0.9_eval.json"),
+    ("Llama-3.1 + Dream",
+     "llama31_gsm8k_code_dream_t0.9_eval.json",     "llama31_math500_code_dream_t0.9_eval.json",
+     "llama31_aime_code_dream_t0.9_eval.json",      "llama31_aime2025_code_dream_t0.9_eval.json"),
+]
+
+
+def _load_math_code_eval(path: Path | None) -> dict[str, Any] | None:
+    data = _load_json(path) if path else None
+    if data is None:
+        return None
+    acc = data.get("accuracy")
+    n = data.get("n_problems")
+    t_avg = (data.get("timing") or {}).get("generate_s_avg")
+    return {
+        "n": n,
+        "acc_pct": round(acc * 100, 1) if acc is not None else None,
+        "s_per_sample": round(t_avg, 1) if t_avg is not None else None,
+        "subject_breakdown": data.get("subject_breakdown"),
+    }
+
+
+def section_math_code(out: list[str]) -> None:
+    out.append("## Math Benchmarks — Code-Execution Mode\n")
+    out.append("> AR model generates a Python `solution()` function; answer extracted by exec()."
+               " CoCoder = AR code draft + Dream-Coder remask τ=0.9 on the code.\n")
+    out.append("> GSM8K n=1319 (grade school). MATH-500 n=500 (competition). AIME n=90 (2022-2024). AIME-2025 n=30.\n")
+
+    headers = ["模型", "GSM8K acc%", "MATH500 acc%", "AIME acc%", "AIME-2025 acc%"]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    for label, gsm_f, math_f, aime_f, aime25_f in _MATH_CODE_ENTRIES:
+        gsm   = _load_math_code_eval(MATH_CODE_OUT / gsm_f   if gsm_f   else None)
+        math  = _load_math_code_eval(MATH_CODE_OUT / math_f  if math_f  else None)
+        aime  = _load_math_code_eval(MATH_CODE_OUT / aime_f  if aime_f  else None)
+        aime25 = _load_math_code_eval(MATH_CODE_OUT / aime25_f if aime25_f else None)
+        out.append(_fmt_row(
+            label,
+            _pct(gsm["acc_pct"]    if gsm   else None),
+            _pct(math["acc_pct"]   if math  else None),
+            _pct(aime["acc_pct"]   if aime  else None),
+            _pct(aime25["acc_pct"] if aime25 else None),
+        ))
+
+    out.append(_fmt_row(*[""] * 5))
+    for label, gsm_f, math_f, aime_f, aime25_f in _MATH_CODE_COLLAB_ENTRIES:
+        gsm   = _load_math_code_eval(MATH_CODE_OUT / gsm_f   if gsm_f   else None)
+        math  = _load_math_code_eval(MATH_CODE_OUT / math_f  if math_f  else None)
+        aime  = _load_math_code_eval(MATH_CODE_OUT / aime_f  if aime_f  else None)
+        aime25 = _load_math_code_eval(MATH_CODE_OUT / aime25_f if aime25_f else None)
+        out.append(_fmt_row(
+            label,
+            _pct(gsm["acc_pct"]    if gsm   else None),
+            _pct(math["acc_pct"]   if math  else None),
+            _pct(aime["acc_pct"]   if aime  else None),
+            _pct(aime25["acc_pct"] if aime25 else None),
+        ))
+
+    out.append("")
+    out.append("> 上半部分：AR code-only baseline；下半部分：CoCoder 协作结果。\n")
+    out.append("> 核心 insight：math→code 使 CoCoder 的代码级 locator 可复用于数学推理。\n")
+
+    out.append("### MATH500 Subject Breakdown (Code Mode)\n")
+    subj_headers = ["模型"] + [s.replace("Counting & Probability", "C&P") for s in _MATH500_SUBJECTS]
+    out.append(_fmt_row(*subj_headers))
+    out.append(_hr(len(subj_headers)))
+    for label, _gsm_f, math_f, _aime_f, _aime25_f in _MATH_CODE_ENTRIES:
+        math = _load_math_code_eval(MATH_CODE_OUT / math_f if math_f else None)
+        if math is None or not math.get("subject_breakdown"):
+            out.append(_fmt_row(label, *["—"] * len(_MATH500_SUBJECTS)))
+            continue
+        bd = math["subject_breakdown"]
+        cells = [label]
+        for subj in _MATH500_SUBJECTS:
+            s = bd.get(subj)
+            cells.append(f"{s['correct']}/{s['total']} ({s['accuracy']*100:.0f}%)" if s else "—")
+        out.append(_fmt_row(*cells))
+    out.append("")
+
+
+# ---------------------------------------------------------------------------
 # Section: General Domain Benchmarks（research QA + writing）
 # ---------------------------------------------------------------------------
 
@@ -1140,7 +1305,7 @@ def section_table2_extended(out: list[str]) -> None:
         ("DeepSeek-Coder 6.7B",  "deepseek_livecodebench_pass1_clean_summary.json"),
         ("Qwen2.5-Coder 7B",     "qwen_livecodebench_summary.json"),
         ("Llama-3.1 8B",         "llama31_livecodebench_summary.json"),
-        ("Dream-Coder 7B",       "dream_livecodebench_summary.json"),
+        ("Dream-Coder 7B",       "dream_livecodebench_pass1_sharded_summary.json"),
         ("LLaDA 8B",             "llada_livecodebench_summary.json"),
         ("StarCoder2 7B",        "starcoder2_livecodebench_summary.json"),
         ("Collab τ=0.9 (n=100)", "sample100_collab_t0.9_livecodebench_seed3407_summary.json"),
@@ -1238,6 +1403,7 @@ def main() -> None:
     section_locator_ablation(lines)
     section_locator_fault_detection(lines)
     section_math(lines)
+    section_math_code(lines)
     section_general_domain(lines)
     section_tau_sweep(lines)
     section_table2_extended(lines)

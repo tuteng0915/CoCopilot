@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -40,6 +39,7 @@ from coder.models import (
     DreamCoder,
     CoderModel,
 )
+from coder.utils.code_cleaning import build_evalplus_solution
 from coder.utils.schema import ModelRequest
 
 
@@ -76,13 +76,6 @@ def build_ar_model(name: str, device: str, model_id: Optional[str]) -> CoderMode
     if name in ["api", "api_coder", "closed_api"]:
         return ApiCoder(model_id=model_id, device="api")
     raise ValueError(f"Unknown --ar_model: {name}")
-
-
-def build_evalplus_solution(prompt_text: str, gen: str) -> str:
-    g = (gen or "").lstrip()
-    if re.search(r"(?m)^(def|class|import|from)\s+", g):
-        return g.rstrip()
-    return (prompt_text.rstrip() + "\n" + gen.lstrip()).rstrip()
 
 
 def mask_low_confidence_spans(
@@ -448,4 +441,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

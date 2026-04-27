@@ -1,5 +1,7 @@
 # Spec: Seed-Coder-8B-Instruct 实验
 
+> Historical note (2026-04-20): this completed spec records the original Seed-Coder-Instruct integration. Current Seed-Coder-Instruct HumanEval conclusions are superseded by the packaging-normalized (`pkgv2`) analysis in `docs/specs/spec_seed_coder_instruct_conservative_remask.md` and `docs/results.md`.
+
 ## 目标
 
 测试 `ByteDance-Seed/Seed-Coder-8B-Instruct` 作为新的 AR drafter，验证 CoCoder 是否对 DeepSeek-Coder 以外的 code-specialized 模型同样有效。

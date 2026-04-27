@@ -16,7 +16,7 @@
 | Dream-Coder 7B | 43.3% | 45.1% | 63.8% | 72.8% | 131.3s | 121.4s |
 | LLaDA 8B | 12.8% | 15.9% | 26.2% | 30.4% | 21.4s | 18.0s |
 | Seed-Coder 8B | 12.2% | 14.0% | 71.4% | 84.4% | 3.0s | 3.7s |
-| Seed-Coder-Instruct 8B | 70.1% | 75.0% | 72.2% | 84.9% | 2.8s | 2.0s |
+| Seed-Coder-Instruct 8B | 75.6% | 81.1% | 72.2% | 84.9% | 2.8s | 2.0s |
 | Seed-DiffCoder 8B | 65.9% | 70.7% | 73.3% | 85.7% | 11.3s | 8.4s |
 | DiffuLLaMA 7B | 3.7% | 3.7% | 2.6% | 3.2% | 15.4s | 15.2s |
 
@@ -38,8 +38,8 @@
 | humaneval | StarCoder2 7B | LLaDA 8B | LLaDA 8B | 23.2% | 23.2% | +0.0pp | 0 | 0 | 39.2s | ✅ |
 | humaneval | Mistral 7B | LLaDA 8B | LLaDA 8B | 31.1% | 31.1% | +0.0pp | 2 | 2 | 22.1s | ✅ |
 | humaneval | CodeLlama 7B | LLaDA 8B | LLaDA 8B | 25.6% | 32.3% | +6.7pp | 16 | 5 | 10.9s | ✅ |
-| humaneval | Seed-Coder-Instruct 8B | Dream-Coder 7B | Dream-Coder 7B | 70.1% | 65.2% | -4.9pp | 10 | 18 | 10.2s | ✅ |
-| humaneval | Seed-Coder-Instruct 8B | LLaDA 8B | LLaDA 8B | 70.1% | 62.8% | -7.3pp | 10 | 22 | 10.3s | ✅ |
+| humaneval | Seed-Coder-Instruct 8B | Dream-Coder 7B | Dream-Coder 7B | 75.6% | 75.6% | +0.0pp | 0 | 0 | 10.2s | ✅ |
+| humaneval | Seed-Coder-Instruct 8B | LLaDA 8B | LLaDA 8B | 75.6% | 72.6% | -3.0pp | 0 | 5 | 10.3s | ✅ |
 |  |  |  |  |  |  |  |  |  |  |  |
 | mbpp | DeepSeek-Coder 6.7B | Dream-Coder 7B | Dream-Coder 7B | 65.1% | 70.1% | +5.0pp | 20 | 1 | 15.2s | ✅ |
 | mbpp | Qwen2.5-Coder 7B | Dream-Coder 7B | Dream-Coder 7B | 73.0% | 72.2% | -0.8pp | 1 | 4 | 10.5s | ✅ |
@@ -64,9 +64,11 @@
 
 ## Table 4 — AR Model Baselines（pass@1 plus%）
 
+> 本表使用已有 EvalPlus sanitized 评测产物。
+
 | AR 模型 | 方法 | HE+ plus% | HE+ base% | MBPP+ plus% | MBPP+ base% | s/sample (HE) | s/sample (MBPP) |
 |---|---|---|---|---|---|---|---|
-| DeepSeek-Coder 6.7B | DeepSeek baseline | 56.7% | 62.2% | 65.1% | 74.9% | — | — |
+| DeepSeek-Coder 6.7B | DeepSeek baseline | 56.7% | 62.2% | 65.1% | 74.9% | 6.9s | 5.2s |
 |  | + Self-Refine | 70.1% | 76.2% | 68.5% | 77.5% | 4.6s | 6.1s |
 |  | + Reflexion (w/ feedback) | 59.1% | 67.1% | 49.5% | 67.2% | 9.5s | 14.2s |
 |  | + Rerank logprob k=8 | 68.9% | 76.8% | 66.9% | 77.8% | 61.7s | 48.7s |
@@ -83,22 +85,24 @@
 |  | + Dream remask τ=0.9 (ours) | 76.8% | 81.7% | 72.2% | 82.3% | 6.5s | 8.8s |
 |  |  |  |  |  |  |  |  |
 | Llama-3.1 8B | Llama-3.1 baseline | 57.9% | 62.2% | 62.4% | 71.7% | 2.8s | 1.3s |
-|  | + Self-Refine | 54.9% | 59.1% | 55.8% | 68.8% | — | 1.7s |
+|  | + Self-Refine | 54.9% | 59.1% | 55.8% | 68.8% | 4.3s | 1.7s |
 |  | + Reflexion (w/ feedback) | 39.0% | 48.8% | 37.3% | 51.9% | 14.3s | 11.8s |
-|  | + Rerank logprob k=8 | — | — | — | — | — | — |
-|  | + Locate-AR-Rewrite | — | — | — | — | — | — |
+|  | + Rerank logprob k=8 | 57.9% | 61.0% | 64.0% | 73.5% | 22.5s | 11.0s |
+|  | + Locate-AR-Rewrite | 53.7% | 58.5% | 57.1% | 66.7% | 3.5s | 1.5s |
 |  | + LLaDA remask τ=0.9 | 56.1% | 59.8% | 53.2% | 62.4% | 13.6s | 5.4s |
 |  | + Dream remask τ=0.9 (ours) | 57.3% | 62.2% | 64.0% | 73.3% | 13.3s | 4.5s |
 |  |  |  |  |  |  |  |  |
 | StarCoder2 7B | StarCoder2 baseline | 23.2% | 26.2% | 28.3% | 32.8% | 17.7s | 17.4s |
-|  | + Self-Refine | 7.9% | 7.9% | 12.2% | 16.9% | — | 16.3s |
-|  | + Reflexion (w/ feedback) | — | — | — | — | — | — |
-|  | + Rerank logprob k=8 | — | — | — | — | — | — |
-|  | + Locate-AR-Rewrite | — | — | — | — | — | — |
+|  | + Self-Refine | 7.9% | 7.9% | 12.2% | 16.9% | 16.3s | 16.3s |
+|  | + Reflexion (w/ feedback) | 7.9% | 7.9% | 9.8% | 13.8% | 33.1s | 24.2s |
+|  | + Rerank logprob k=8 | 7.9% | 9.1% | 13.5% | 16.4% | 122.7s | 129.9s |
+|  | + Locate-AR-Rewrite | 3.0% | 3.7% | 4.2% | 5.6% | 17.4s | 16.4s |
 |  | + LLaDA remask τ=0.9 | 23.2% | 26.2% | 28.8% | 33.3% | 21.5s | 18.3s |
 |  | + Dream remask τ=0.9 (ours) | 23.2% | 26.2% | 33.1% | 38.1% | 46.2s | 46.0s |
 
 > s/sample = 方法总耗时 / 题目数。DeepSeek baseline timing 来自 `_timed` 重跑产物。
+
+> 若 EvalPlus 结果中同一 task 出现重复样本，本表按 pass@1 口径只计每个 task 的第一条样本；这修正了 Llama-3.1/StarCoder2 Locate-AR-Rewrite HumanEval 的 merge duplicate artifact。
 
 ## Locator Ablation（DeepSeek-Coder + Dream refine）
 
@@ -203,7 +207,7 @@
 | DeepSeek-Coder 6.7B | 1055 | 11.37% | ✅ |
 | Qwen2.5-Coder 7B | 1055 | 22.56% | ✅ |
 | Llama-3.1 8B | 1055 | 7.96% | ✅ |
-| Dream-Coder 7B | 71 | 0.00% | ✅ |
+| Dream-Coder 7B | 1055 | 2.94% | ✅ |
 | LLaDA 8B | — | — | ❌ n_scored=0 |
 | StarCoder2 7B | 1055 | 0.00% | ✅ |
 | Collab τ=0.9 (n=100) | 100 | 12.00% | ✅ |
@@ -217,9 +221,9 @@
 | DeepSeek-Coder 6.7B | 24.7% | ✅ |
 | Qwen2.5-Coder 7B | 38.0% | ✅ |
 | Llama-3.1 8B | 19.0% | ✅ |
-| Collab τ=0.9 (n=100) | — | ❌ |
-| Dream (n=100) | — | ❌ |
-| DeepSeek (n=100) | — | ❌ |
+| Collab τ=0.9 (n=100) | 23.0% | ✅ |
+| Dream (n=100) | 28.0% | ✅ |
+| DeepSeek (n=100) | 23.0% | ✅ |
 
 > 以上为 pass1_clean 结果（strip markdown fencing）。raw 版本均 0.0%（见 pitfalls.md）。
 

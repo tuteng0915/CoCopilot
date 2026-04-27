@@ -10,7 +10,10 @@ from tqdm import tqdm
 from evalplus.data import get_human_eval_plus, get_mbpp_plus
 
 from coder.utils.schema import ModelRequest, SampleRecord
-from coder.utils.code_cleaning import clean_model_completion as _clean_model_completion
+from coder.utils.code_cleaning import (
+    build_evalplus_solution as _build_evalplus_solution,
+    clean_model_completion as _clean_model_completion,
+)
 from coder.models import (
     CoderModel,
     DreamCoder,
@@ -27,7 +30,6 @@ from coder.models import (
     SeedCoder,
     ApiCoder,
 )
-import re
 
 
 def build_model(name: str, device: str, model_id: str | None) -> CoderModel:
@@ -134,80 +136,7 @@ def clean_model_completion(text: str, prompt: str | None = None) -> str:
 
 
 def build_evalplus_solution(prob: dict, gen: str) -> str:
-    """
-    EvalPlus accepts a full `solution` program.
-    If gen already looks like complete code, use it directly.
-    Otherwise, treat gen as completion and prepend prompt.
-    """
-    g = (gen or "").lstrip()
-    prompt = prob["prompt"].rstrip()
-
-    def extract_prompt_imports(p: str) -> str:
-        imports = []
-        for line in p.splitlines():
-            s = line.strip()
-            if s.startswith("from ") or s.startswith("import "):
-                imports.append(line.rstrip())
-                continue
-            # Stop once we hit code beyond the import prelude.
-            if s.startswith("def ") or s.startswith("class "):
-                break
-        return "\n".join(imports).strip()
-
-    def infer_target_func_name(p: str) -> str | None:
-        m = re.search(r"(?m)^\s*def\s+([A-Za-z_]\w*)\s*\(", p)
-        return m.group(1) if m else None
-
-    def extract_single_function(src: str, func_name: str) -> str | None:
-        # Capture optional decorators right above the target def.
-        # Then capture the def block until the next top-level def/class or EOF.
-        pattern = (
-            rf"(?ms)^(?P<decor>(?:@\w[^\n]*\n)*)"
-            rf"(?P<def>def\s+{re.escape(func_name)}\s*\(.*?)(?=^\s*(?:def|class)\s+|\Z)"
-        )
-        m = re.search(pattern, src)
-        if not m:
-            return None
-        return (m.group("decor") + m.group("def")).strip()
-
-    def indent_as_body(completion: str, spaces: int = 4) -> str:
-        # Body completions should be indented under a function definition.
-        # Some models output a mix (first line not indented, later lines already indented).
-        # We only indent lines that start at column 0, preserving existing indentation.
-        pad = " " * spaces
-        out_lines = []
-        for line in completion.splitlines():
-            if line.strip():
-                if line.startswith((" ", "\t")):
-                    out_lines.append(line.rstrip())
-                else:
-                    out_lines.append(pad + line.rstrip())
-            else:
-                out_lines.append("")
-        return "\n".join(out_lines).rstrip()
-
-    # If the model already returned full code, don't prepend the prompt again.
-    if re.search(r"(?m)^(def|class|import|from)\s+", g):
-        # Heuristics for models that dump multiple defs / miss prompt imports.
-        tgt = infer_target_func_name(prompt)
-        if tgt:
-            extracted = extract_single_function(g, tgt)
-            if extracted:
-                g2 = extracted
-            else:
-                g2 = g.rstrip()
-        else:
-            g2 = g.rstrip()
-
-        imports = extract_prompt_imports(prompt)
-        if imports and imports not in g2:
-            # If the prompt contained imports, keep them so typing names resolve.
-            g2 = (imports + "\n\n" + g2).rstrip()
-        return g2.rstrip()
-
-    # Otherwise assume completion (e.g., body-only for HumanEval)
-    body = indent_as_body(gen.lstrip())
-    return (prompt + "\n" + body).rstrip()
+    return _build_evalplus_solution(prob["prompt"], gen)
 
 
 def main():
