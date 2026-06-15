@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ ABLATION_LOCATOR = REPO_ROOT / "outputs" / "ablation_locator"
 RESEARCH_OUT = REPO_ROOT / "outputs" / "research"
 WRITING_OUT = REPO_ROOT / "outputs" / "writing"
 MATH_CODE_OUT = REPO_ROOT / "outputs" / "math_code"
+SQL_OUT = REPO_ROOT / "outputs" / "sql_feasibility"
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +138,45 @@ def _load_timing(timing_path: Path | None, expected_n: int | None = None) -> flo
     if n:
         return round(t["total_s"] / n, 1)
     return None
+
+
+def _load_mean_mask_fraction(jsonl_path: Path) -> float | None:
+    if not jsonl_path.exists():
+        return None
+    values: list[float] = []
+    try:
+        with jsonl_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                gen = (json.loads(line).get("gen") or {})
+                value = gen.get("mask_fraction")
+                if value is not None:
+                    values.append(float(value))
+    except Exception:
+        return None
+    if not values:
+        return None
+    return round(100.0 * sum(values) / len(values), 1)
+
+
+def _load_oracle_mask_counts(jsonl_path: Path) -> tuple[int, int] | None:
+    if not jsonl_path.exists():
+        return None
+    n_records = 0
+    n_non_null = 0
+    try:
+        with jsonl_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                n_records += 1
+                spans = json.loads(line).get("oracle_mask_spans")
+                if spans:
+                    n_non_null += 1
+    except Exception:
+        return None
+    return n_records, n_non_null
 
 
 def _load_livecodebench(fname: str) -> dict[str, Any] | None:
@@ -630,6 +671,20 @@ _LOCATOR_ABLATION_ENTRIES = [
         ABLATION_LOCATOR / "deepseek_dream_humaneval_t0.9_loc_bert.jsonl.timing_summary.json",
         ABLATION_LOCATOR / "deepseek_dream_mbpp_t0.9_loc_bert.jsonl.timing_summary.json",
     ),
+    (
+        "Random locator (`mask_ratio=0.10`)",
+        OUTPUTS / "deepseek_random_locate_dream_rewrite_humaneval_summary.json",
+        OUTPUTS / "deepseek_random_locate_dream_rewrite_mbpp_summary.json",
+        OUTPUTS / "deepseek_random_locate_dream_rewrite_humaneval.jsonl.timing_summary.json",
+        OUTPUTS / "deepseek_random_locate_dream_rewrite_mbpp.jsonl.timing_summary.json",
+    ),
+    (
+        "Oracle locator (`gold diff spans`)",
+        OUTPUTS / "deepseek_oracle_locate_dream_rewrite_humaneval_summary.json",
+        OUTPUTS / "deepseek_oracle_locate_dream_rewrite_mbpp_summary.json",
+        OUTPUTS / "deepseek_oracle_locate_dream_rewrite_humaneval.jsonl.timing_summary.json",
+        OUTPUTS / "deepseek_oracle_locate_dream_rewrite_mbpp.jsonl.timing_summary.json",
+    ),
 ]
 
 
@@ -662,6 +717,43 @@ def section_locator_ablation(out: list[str]) -> None:
 
     out.append("")
     out.append("> AR / CodeBERT locator rows use `confidence_threshold=0.9`; refine model remains Dream-Coder 7B.\n")
+    random_he_mask = _load_mean_mask_fraction(
+        OUTPUTS / "deepseek_random_locate_dream_rewrite_humaneval.jsonl",
+    )
+    random_mbpp_mask = _load_mean_mask_fraction(
+        OUTPUTS / "deepseek_random_locate_dream_rewrite_mbpp.jsonl",
+    )
+    random_mask_note = (
+        f"Mean recorded mask fraction: HumanEval {random_he_mask:.1f}%, MBPP {random_mbpp_mask:.1f}%."
+        if random_he_mask is not None and random_mbpp_mask is not None
+        else "Mean recorded mask fraction unavailable."
+    )
+    out.append(
+        "> Random locator uses DeepSeek-Coder drafts + Dream-Coder rewrite with random token confidence "
+        "and `mask_ratio=0.10`; all records have `skip_refine=False`. "
+        f"{random_mask_note} Raw outputs: "
+        "`outputs/base_tuteng/deepseek_random_locate_dream_rewrite_humaneval.jsonl`, "
+        "`outputs/base_tuteng/deepseek_random_locate_dream_rewrite_mbpp.jsonl`; summaries: "
+        "`outputs/base_tuteng/deepseek_random_locate_dream_rewrite_humaneval_summary.json`, "
+        "`outputs/base_tuteng/deepseek_random_locate_dream_rewrite_mbpp_summary.json`.\n"
+    )
+    oracle_he_counts = _load_oracle_mask_counts(OUTPUTS / "deepseek_humaneval_oracle_mask.jsonl")
+    oracle_mbpp_counts = _load_oracle_mask_counts(OUTPUTS / "deepseek_mbpp_oracle_mask.jsonl")
+    oracle_count_note = (
+        f"Oracle mask files contain {oracle_he_counts[0]} HumanEval rows and {oracle_mbpp_counts[0]} MBPP rows, "
+        f"with non-null spans for {oracle_he_counts[1]} HumanEval and {oracle_mbpp_counts[1]} MBPP tasks."
+        if oracle_he_counts is not None and oracle_mbpp_counts is not None
+        else "Oracle mask count metadata unavailable."
+    )
+    out.append(
+        "> Oracle locator uses DeepSeek-Coder drafts plus oracle diff masks computed against the available "
+        "`_timed` Dream remask outputs. "
+        f"{oracle_count_note} Raw outputs: "
+        "`outputs/base_tuteng/deepseek_oracle_locate_dream_rewrite_humaneval.jsonl`, "
+        "`outputs/base_tuteng/deepseek_oracle_locate_dream_rewrite_mbpp.jsonl`; summaries: "
+        "`outputs/base_tuteng/deepseek_oracle_locate_dream_rewrite_humaneval_summary.json`, "
+        "`outputs/base_tuteng/deepseek_oracle_locate_dream_rewrite_mbpp_summary.json`.\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -988,6 +1080,349 @@ def section_locator_fault_detection(out: list[str]) -> None:
     out.append(
         "> dLLM locator 对 fault token 置信度极低（HE P≈0.04，MBPP P≈0.008），"
         "与 non-fault token 差距悬殊；AR 和 MLM locator 几乎无区分（ratio≈1x）。\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section: Locator Calibration / ROC-AUC
+# ---------------------------------------------------------------------------
+
+def _load_calibration_row(tag: str) -> dict[str, Any] | None:
+    data = _load_json(ABLATION_LOCATOR / f"calibration_data_{tag}.json")
+    auc_summary = _load_json(ABLATION_LOCATOR / "plots" / "auc_summary.json") or {}
+    auc = auc_summary.get(tag, {}) if isinstance(auc_summary, dict) else {}
+    if data is None and not auc:
+        return None
+    return {
+        "n_eligible": (data or {}).get("n_eligible"),
+        "n_pairs": (data or {}).get("n_pairs"),
+        "n_fault": (data or {}).get("n_fault"),
+        "n_nonfault": (data or {}).get("n_nonfault"),
+        "include_collab_fail": (data or {}).get("include_collab_fail"),
+        "dllm_auc": auc.get("dLLM (Dream-Coder)"),
+        "ar_auc": auc.get("AR logprob"),
+        "bert_auc": auc.get("CodeBERT"),
+        "random_auc": auc.get("Random"),
+    }
+
+
+def _load_calibration_matrix() -> list[dict[str, Any]]:
+    data = _load_json(ABLATION_LOCATOR / "matrix" / "calibration_matrix_summary.json")
+    rows = (data or {}).get("rows") or []
+    return rows if isinstance(rows, list) else []
+
+
+def section_locator_calibration(out: list[str]) -> None:
+    out.append("## Locator Calibration / ROC-AUC\n")
+    out.append(
+        "> Per-token changed-span labels from DeepSeek-Coder failed drafts and Dream-Coder remask outputs. "
+        "Low confidence is treated as predicting a fault token. Because strict corrected pairs are sparse, "
+        "these runs use `--include_collab_fail`; interpret AUC as changed-token separability rather than a "
+        "pure repair-success metric.\n"
+    )
+
+    headers = [
+        "Dataset", "Eligible", "Changed pairs", "Fault tokens", "Non-fault tokens",
+        "dLLM AUC", "AR AUC", "CodeBERT AUC", "Random AUC",
+    ]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    def _auc(value: Any) -> str:
+        return f"{float(value):.3f}" if value is not None else "—"
+
+    rows = {
+        "HumanEval": _load_calibration_row("humaneval"),
+        "MBPP": _load_calibration_row("mbpp"),
+    }
+    if all(row is None for row in rows.values()):
+        out.append(_fmt_row("*（calibration_data / auc_summary 不存在）*", *["—"] * (len(headers) - 1)))
+    else:
+        for label, row in rows.items():
+            if row is None:
+                out.append(_fmt_row(label, *["—"] * (len(headers) - 1)))
+                continue
+            out.append(_fmt_row(
+                label,
+                row.get("n_eligible", "—"),
+                row.get("n_pairs", "—"),
+                row.get("n_fault", "—"),
+                row.get("n_nonfault", "—"),
+                _auc(row.get("dllm_auc")),
+                _auc(row.get("ar_auc")),
+                _auc(row.get("bert_auc")),
+                _auc(row.get("random_auc")),
+            ))
+
+    out.append("")
+    out.append(
+        "> 产物：`outputs/ablation_locator/calibration_data_humaneval.json`, "
+        "`outputs/ablation_locator/calibration_data_mbpp.json`, "
+        "`outputs/ablation_locator/plots/{calibration,roc}_{humaneval,mbpp}.pdf`, "
+        "`outputs/ablation_locator/plots/auc_summary.json`。\n"
+    )
+    out.append(
+        "> 结论：dLLM AUC 最高（HE 0.951, MBPP 0.960）。HumanEval fault tokens 只有 12 个，"
+        "MBPP 有 27 个；AR/CodeBERT 在 changed-token proxy 上也高于随机，因此这组图适合作为"
+        "可视化补充，intrinsic locator 质量仍以 surgical fault-detection ratio 为主。\n"
+    )
+
+    matrix_rows = _load_calibration_matrix()
+    if not matrix_rows:
+        return
+
+    out.append("### Full Model-Pair Calibration Matrix\n")
+    out.append(
+        "> 完整矩阵覆盖 `model_pairs_all_t0.9.json` 中 7 个 AR drafter × 2 个 dLLM refiner × "
+        "HumanEval/MBPP，共 28 组。所有行使用 `--include_collab_fail`；Llama-3.1 AR logprob "
+        "locator 因 gated HF 权限不可用，4 行 AR AUC 记为 `—`，但 dLLM/CodeBERT 正常计算。\n"
+    )
+
+    def _mean(values: list[Any]) -> float | None:
+        nums = [float(v) for v in values if v is not None]
+        return (sum(nums) / len(nums)) if nums else None
+
+    summary_headers = ["Dataset", "dLLM refiner", "Rows", "Mean dLLM AUC", "Mean AR AUC", "Mean CodeBERT AUC"]
+    out.append(_fmt_row(*summary_headers))
+    out.append(_hr(len(summary_headers)))
+    for dataset in ["humaneval", "mbpp"]:
+        for dllm in ["Dream-Coder 7B", "LLaDA 8B"]:
+            subset = [row for row in matrix_rows if row.get("dataset") == dataset and row.get("dllm_refiner") == dllm]
+            out.append(_fmt_row(
+                "HumanEval" if dataset == "humaneval" else "MBPP",
+                dllm,
+                len(subset),
+                _auc(_mean([row.get("dllm_auc") for row in subset])),
+                _auc(_mean([row.get("ar_auc") for row in subset])),
+                _auc(_mean([row.get("bert_auc") for row in subset])),
+            ))
+    out.append("")
+
+    detail_headers = [
+        "Dataset", "AR drafter", "dLLM refiner", "Changed pairs", "Fault tokens",
+        "dLLM AUC", "AR AUC", "CodeBERT AUC",
+    ]
+    out.append(_fmt_row(*detail_headers))
+    out.append(_hr(len(detail_headers)))
+    ar_short = {
+        "DeepSeek-Coder 6.7B": "DeepSeek",
+        "Qwen2.5-Coder 7B": "Qwen",
+        "Llama-3.1 8B": "Llama-3.1",
+        "StarCoder2 7B": "StarCoder2",
+        "Mistral 7B": "Mistral",
+        "CodeLlama 7B": "CodeLlama",
+        "Seed-Coder-Instruct 8B": "Seed-Instruct",
+    }
+    dllm_short = {
+        "Dream-Coder 7B": "Dream-Coder",
+        "LLaDA 8B": "LLaDA",
+    }
+    for row in matrix_rows:
+        out.append(_fmt_row(
+            "HumanEval" if row.get("dataset") == "humaneval" else "MBPP",
+            ar_short.get(row.get("ar_drafter"), row.get("ar_drafter", "—")),
+            dllm_short.get(row.get("dllm_refiner"), row.get("dllm_refiner", "—")),
+            row.get("n_changed_pairs", "—"),
+            row.get("n_fault", "—"),
+            _auc(row.get("dllm_auc")),
+            _auc(row.get("ar_auc")),
+            _auc(row.get("bert_auc")),
+        ))
+    out.append("")
+
+    n_ar = sum(1 for row in matrix_rows if row.get("ar_auc") is not None)
+    n_dllm_gt_ar = sum(1 for row in matrix_rows if row.get("ar_auc") is not None and row.get("dllm_auc") > row.get("ar_auc"))
+    n_dllm_gt_bert = sum(1 for row in matrix_rows if row.get("dllm_auc") is not None and row.get("bert_auc") is not None and row.get("dllm_auc") > row.get("bert_auc"))
+    out.append(
+        f"> Matrix 结论：dLLM AUC 在 {n_dllm_gt_ar}/{n_ar} 个 AR-available 行上高于 AR logprob，"
+        f"在 {n_dllm_gt_bert}/{len(matrix_rows)} 行上高于 CodeBERT。"
+        "Dream-Coder 平均 AUC：HE 0.942 / MBPP 0.911；LLaDA 平均 AUC：HE 0.967 / MBPP 0.961。\n"
+    )
+    out.append(
+        "> Matrix 产物：`outputs/ablation_locator/matrix/calibration_matrix_summary.json`, "
+        "`outputs/ablation_locator/matrix/calibration_data_*.json`, "
+        "`outputs/ablation_locator/matrix_plots/{calibration,roc}_*.{pdf,png}`。\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section: SQL Feasibility (Spider)
+# ---------------------------------------------------------------------------
+
+def _load_sql_eval_jsonl(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    n_total = 0
+    n_pass = 0
+    n_pred_errors = 0
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "exec_pass" not in rec:
+                continue
+            n_total += 1
+            n_pass += int(bool(rec.get("exec_pass")))
+            n_pred_errors += int(bool(rec.get("pred_exec_error")))
+    if n_total == 0:
+        return None
+    return {
+        "n_total": n_total,
+        "n_pass": n_pass,
+        "execution_accuracy_pct": round(100.0 * n_pass / n_total, 1),
+        "n_pred_exec_errors": n_pred_errors,
+    }
+
+
+def _load_sql_eval_summary(prefix: str) -> dict[str, Any] | None:
+    for path in [
+        SQL_OUT / f"{prefix}_spider_dev_eval_summary.json",
+        SQL_OUT / f"{prefix}_spider_dev.jsonl.eval_summary.json",
+    ]:
+        data = _load_json(path)
+        if data is not None and data.get("n_total"):
+            return {
+                "n_total": data.get("n_total"),
+                "n_pass": data.get("n_pass"),
+                "execution_accuracy_pct": round(float(data.get("execution_accuracy", 0.0)) * 100, 1),
+                "n_pred_exec_errors": data.get("n_pred_exec_errors"),
+            }
+    return _load_sql_eval_jsonl(SQL_OUT / f"{prefix}_spider_dev_eval.jsonl")
+
+
+def _load_sql_locator_result(locator: str, prefix: str | None = None) -> dict[str, Any] | None:
+    stem = (
+        f"{prefix}_sql_locator_analysis_{locator}"
+        if prefix
+        else f"sql_locator_analysis_{locator}"
+    )
+    summary = _load_json(SQL_OUT / f"{stem}_summary.json")
+    if summary is not None:
+        return {
+            "samples_analyzed": summary.get("samples_analyzed"),
+            "mean_conf_fault": summary.get("mean_conf_fault"),
+            "mean_conf_nonfault": summary.get("mean_conf_nonfault"),
+            "ratio": summary.get("fault_detection_ratio"),
+        }
+
+    log_path = SQL_OUT / f"{stem}.txt"
+    if not log_path.exists():
+        return None
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+
+    def _search_float(pattern: str) -> float | None:
+        m = re.search(pattern, text)
+        return float(m.group(1)) if m else None
+
+    def _search_int(pattern: str) -> int | None:
+        m = re.search(pattern, text)
+        return int(m.group(1)) if m else None
+
+    return {
+        "samples_analyzed": _search_int(r"Samples analyzed:\s+(\d+)"),
+        "mean_conf_fault": _search_float(r"Mean conf @ fault:\s+([0-9.]+)"),
+        "mean_conf_nonfault": _search_float(r"Mean conf @ non-fault:\s+([0-9.]+)"),
+        "ratio": _search_float(r"Fault detection ratio:\s+([0-9.]+)x"),
+    }
+
+
+_SQL_FEASIBILITY_ENTRIES = [
+    ("DeepSeek-Coder 6.7B", "deepseek", None),
+    ("Qwen2.5-Coder 7B", "qwen", "qwen"),
+    ("Llama-3.1 8B", "llama31", "llama31"),
+    ("StarCoder2 7B", "starcoder2", "starcoder2"),
+    ("Mistral 7B", "mistral", "mistral"),
+    ("CodeLlama 7B", "codellama", "codellama"),
+    ("Seed-Coder-Instruct 8B", "seed-coder", "seed-coder"),
+]
+
+
+def section_sql_feasibility(out: list[str]) -> None:
+    out.append("## SQL Feasibility（Spider dev）\n")
+    out.append(
+        "> 轻量 Text-to-SQL 验证：AR 模型生成 Spider SQL 草稿，"
+        "SQLite execution accuracy 评估 AR baseline；对 AR-failed samples 计算 locator "
+        "P(non-fault) / P(fault)。通过阈值：dLLM ratio ≥ 3x。\n"
+    )
+    out.append(
+        "> 背景：Spider 1.0 官方 test leaderboard 已于 2024-02-05 停止更新；"
+        "[execution-with-values 榜](https://yale-lily.github.io/spider)头部为 80–90%+，"
+        "本表只做 dev 前 200 条的轻量 feasibility 检查，不作为 SOTA 对比。\n"
+    )
+
+    headers = [
+        "AR 草稿", "n", "AR Exec Acc", "Pred exec errors",
+        "Dream ratio", "LLaDA ratio", "AR ratio",
+        "Dream CoCoder", "LLaDA CoCoder", "结论",
+    ]
+    out.append(_fmt_row(*headers))
+    out.append(_hr(len(headers)))
+
+    n_rows = 0
+    for label, pred_prefix, locator_prefix in _SQL_FEASIBILITY_ENTRIES:
+        eval_summary = _load_sql_eval_summary(pred_prefix)
+        dream_collab_summary = _load_sql_eval_summary(f"{pred_prefix}_dream_remask")
+        llada_collab_summary = _load_sql_eval_summary(f"{pred_prefix}_llada_remask")
+        dream = _load_sql_locator_result("dream", locator_prefix)
+        llada = _load_sql_locator_result("llada", locator_prefix)
+        ar = _load_sql_locator_result("ar", locator_prefix)
+        if (
+            eval_summary is None
+            and dream_collab_summary is None
+            and llada_collab_summary is None
+            and dream is None
+            and llada is None
+            and ar is None
+        ):
+            continue
+
+        dream_ratio = dream.get("ratio") if dream else None
+        llada_ratio = llada.get("ratio") if llada else None
+        ar_ratio = ar.get("ratio") if ar else None
+        if dream_ratio is None:
+            conclusion = "locator 待跑"
+        elif dream_ratio >= 3.0:
+            conclusion = "可行性通过"
+        elif dream_ratio >= 1.5:
+            conclusion = "信号偏弱"
+        else:
+            conclusion = "未通过"
+
+        out.append(_fmt_row(
+            label,
+            eval_summary.get("n_total") if eval_summary else "—",
+            _pct(eval_summary.get("execution_accuracy_pct") if eval_summary else None),
+            eval_summary.get("n_pred_exec_errors") if eval_summary else "—",
+            f"{dream_ratio:.2f}x" if dream_ratio is not None else "—",
+            f"{llada_ratio:.2f}x" if llada_ratio is not None else "—",
+            f"{ar_ratio:.2f}x" if ar_ratio is not None else "—",
+            _pct(dream_collab_summary.get("execution_accuracy_pct") if dream_collab_summary else None),
+            _pct(llada_collab_summary.get("execution_accuracy_pct") if llada_collab_summary else None),
+            conclusion,
+        ))
+        n_rows += 1
+
+    if n_rows == 0:
+        out.append(_fmt_row(
+            "*（outputs/sql_feasibility 产物不存在）*",
+            "—", "—", "—", "—", "—", "—", "—", "—", "待跑",
+        ))
+
+    out.append("")
+    out.append(
+        "> 产物：`outputs/sql_feasibility/*_spider_dev_eval.jsonl`, "
+        "`outputs/sql_feasibility/*sql_locator_analysis_{dream,llada,ar}.txt`；"
+        "可选 Phase 4 产物为 `outputs/sql_feasibility/*_{dream,llada}_remask_spider_dev_eval.jsonl`。\n"
+    )
+    out.append(
+        "> 更新命令：`python -m coder.scripts.gen_sql_ar` → "
+        "`python -m coder.scripts.sql_eval` → "
+        "`python -m coder.analysis.sql_locator_analysis`。\n"
     )
 
 
@@ -1402,6 +1837,8 @@ def main() -> None:
     section_table4_all_baselines(lines)
     section_locator_ablation(lines)
     section_locator_fault_detection(lines)
+    section_locator_calibration(lines)
+    section_sql_feasibility(lines)
     section_math(lines)
     section_math_code(lines)
     section_general_domain(lines)

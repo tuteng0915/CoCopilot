@@ -2,14 +2,82 @@
 from __future__ import annotations
 
 import re
+import inspect
+from types import SimpleNamespace
 
 import torch
+from transformers.generation.configuration_utils import GenerationConfig
 from transformers import AutoModel, AutoTokenizer
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from coder.locators.base import apply_masking_policy
 from coder.models.base import CoderModel
 from coder.utils.code_cleaning import clean_model_completion
 from coder.utils.schema import ModelRequest
+
+
+def _compute_default_rope_parameters(config=None, device=None, seq_len=None, layer_type=None):
+    config.standardize_rope_params()
+    params = config.rope_parameters[layer_type] if layer_type is not None else config.rope_parameters
+    base = params.get("rope_theta", getattr(config, "rope_theta", 10000.0))
+    partial_rotary_factor = params.get("partial_rotary_factor", 1.0)
+    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+    dim = int(head_dim * partial_rotary_factor)
+    inv_freq = 1.0 / (
+        base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim)
+    )
+    return inv_freq, 1.0
+
+
+ROPE_INIT_FUNCTIONS.setdefault("default", _compute_default_rope_parameters)
+
+_GENERATION_CONFIG_UPDATE = GenerationConfig.update
+_GENERATION_CONFIG_UPDATE_PARAMS = inspect.signature(_GENERATION_CONFIG_UPDATE).parameters
+_GENERATION_CONFIG_UPDATE_SUPPORTS_FLAGS = (
+    "defaults_only" in _GENERATION_CONFIG_UPDATE_PARAMS
+    or "allow_custom_entries" in _GENERATION_CONFIG_UPDATE_PARAMS
+)
+
+for _name, _value in {
+    "eps": 1e-3,
+    "steps": 512,
+    "alg": "origin",
+    "alg_temp": None,
+    "eos_penalty": 0.0,
+    "output_history": False,
+}.items():
+    if not hasattr(GenerationConfig, _name):
+        setattr(GenerationConfig, _name, _value)
+
+
+def _update_generation_config_compat(self, defaults_only=False, allow_custom_entries=False, **kwargs):
+    try:
+        if _GENERATION_CONFIG_UPDATE_SUPPORTS_FLAGS:
+            return _GENERATION_CONFIG_UPDATE(
+                self,
+                defaults_only=defaults_only,
+                allow_custom_entries=allow_custom_entries,
+                **kwargs,
+            )
+        return _GENERATION_CONFIG_UPDATE(self, **kwargs)
+    except TypeError as exc:
+        if "user_set_attributes" not in str(exc):
+            raise
+
+    to_remove = []
+    for key, value in kwargs.items():
+        if allow_custom_entries and not hasattr(self, key):
+            setattr(self, key, value)
+            to_remove.append(key)
+        elif hasattr(self, key):
+            if not defaults_only or getattr(self, key) is None:
+                setattr(self, key, value)
+                to_remove.append(key)
+    self.validate()
+    return {key: value for key, value in kwargs.items() if key not in to_remove}
+
+
+GenerationConfig.update = _update_generation_config_compat
 
 
 class DreamCoder(CoderModel):
@@ -27,6 +95,22 @@ class DreamCoder(CoderModel):
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
         ).to(device).eval()
+        gen_config = self.model.generation_config
+        for name, value in {
+            "eps": 1e-3,
+            "steps": 512,
+            "alg": "origin",
+            "alg_temp": None,
+            "eos_penalty": 0.0,
+            "output_history": False,
+            "mask_token_id": getattr(self.model.config, "mask_token_id", None),
+            "pad_token_id": getattr(self.model.config, "pad_token_id", None),
+            "bos_token_id": getattr(self.model.config, "bos_token_id", None),
+            "eos_token_id": getattr(self.model.config, "eos_token_id", None),
+        }.items():
+            if not hasattr(gen_config, name) or getattr(gen_config, name) is None:
+                setattr(gen_config, name, value)
+        self._wrap_forward_logits_compat()
 
         self.tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         if self.tok.pad_token is None and self.tok.eos_token is not None:
@@ -35,6 +119,31 @@ class DreamCoder(CoderModel):
     @property
     def name(self) -> str:
         return f"dream_coder::{self.model_id}"
+
+    def _wrap_forward_logits_compat(self) -> None:
+        original_forward = self.model.forward
+
+        def forward_compat(*args, **kwargs):
+            out = original_forward(*args, **kwargs)
+            logits = getattr(out, "logits", None)
+            if isinstance(logits, torch.Tensor) and logits.ndim == 4 and (
+                logits.shape[1] == 1 or logits.shape[2] == 1
+            ):
+                squeezed = logits.squeeze(1) if logits.shape[1] == 1 else logits.squeeze(2)
+                if hasattr(out, "logits"):
+                    try:
+                        out.logits = squeezed
+                        return out
+                    except Exception:
+                        pass
+                if isinstance(out, tuple):
+                    return (squeezed, *out[1:])
+                data = dict(out) if isinstance(out, dict) else {}
+                data["logits"] = squeezed
+                return SimpleNamespace(**data)
+            return out
+
+        self.model.forward = forward_compat
 
     def _clean_completion(self, text: str, prompt: str) -> str:
         return clean_model_completion(text, prompt=prompt)
@@ -140,6 +249,9 @@ class DreamCoder(CoderModel):
                 x[0, L_p : L_p + M] = init_comp[0]
             return x
 
+        def logits_hook(step, x, logits):
+            return torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
+
         if req.seed is not None:
             torch.manual_seed(req.seed)
             if torch.cuda.is_available():
@@ -153,6 +265,7 @@ class DreamCoder(CoderModel):
         out = self.model.diffusion_generate(
             prompt_ids,
             attention_mask=attn_mask,
+            generation_config=self.model.generation_config,
             max_new_tokens=M,           # must equal draft length exactly
             output_history=False,
             return_dict_in_generate=True,
@@ -162,6 +275,7 @@ class DreamCoder(CoderModel):
             alg="entropy",
             alg_temp=0.0,
             generation_tokens_hook_func=init_hook,
+            generation_logits_hook_func=logits_hook,
         )
 
         seq = out.sequences[0]
@@ -206,6 +320,7 @@ class DreamCoder(CoderModel):
         out = self.model.diffusion_generate(
             input_ids,
             attention_mask=attention_mask,
+            generation_config=self.model.generation_config,
             max_new_tokens=req.max_new_tokens,
             output_history=False,
             return_dict_in_generate=True,

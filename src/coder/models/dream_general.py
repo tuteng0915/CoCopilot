@@ -112,6 +112,9 @@ class DreamGeneral(CoderModel):
                 x[0, L_p: L_p + M] = init_comp[0]
             return x
 
+        def logits_hook(step, x, logits):
+            return torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
+
         if req.seed is not None:
             torch.manual_seed(req.seed)
             if torch.cuda.is_available():
@@ -133,6 +136,7 @@ class DreamGeneral(CoderModel):
             alg="entropy",
             alg_temp=0.0,
             generation_tokens_hook_func=init_hook,
+            generation_logits_hook_func=logits_hook,
         )
 
         seq = out.sequences[0]

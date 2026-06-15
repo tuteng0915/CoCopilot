@@ -1,335 +1,317 @@
-# Spec: Math-to-Code Pipeline（GSM8K / MATH-500 / AIME / AIME-2025）
+# Spec: Math-to-Code Pipeline（扩展版 v2）
 
-## 目标
-
-绕过 CoCoder 在直接数学推理上的局限（confidence signal 对算术错误不敏感），改为让 AR 模型生成**可执行 Python 代码**来解题，再对代码进行 remask 精炼，最后 exec 代码得到答案。
-
-**背景**：现有 `gen_math.py` 让模型直接输出 chain-of-thought 文本，CoCoder 对此无效（GSM8K DeepSeek+Dream: -0.8pp，MATH500 -1.4pp）。根本原因是自然语言数学步骤中的算术错误在 token 分布上无法区分——但若换成 Python 代码，逻辑/算术错误会表现为结构性问题（缩进、运算符、变量名），dLLM 的 confidence signal 与代码错误的相关性更强。
-
-## Contribution 定位
-
-> **C2（分析贡献）**：系统研究 locator 信号在不同域的迁移性，发现 dLLM confidence 只适用于"syntactically verifiable"域（代码）。
-> **C3（扩展贡献）**：通过 math→code 范式，将 CoCoder 扩展到数学推理，验证代码级 locator 可复用。
-
-AIME 是高权威竞赛题（答案为整数 000-999），加入后强化 C3 的可信度。
-
-## 数据集一览
-
-| 数据集 | HuggingFace ID | 规模 | 答案类型 | 难度 |
-|--------|---------------|------|---------|------|
-| GSM8K | `openai/gsm8k` | 1319 | 数字 | 小学 |
-| MATH-500 | `HuggingFaceH4/MATH-500` | 500 | 数学表达式 | 竞赛 |
-| AIME 2022-2024 | `AI-MO/aimo-validation-aime` | 90 | 整数 0-999 | 顶级竞赛 |
-| AIME 2025 | `MathArena/aime_2025` | 30 | 整数 0-999 | 顶级竞赛（最新）|
+> v1 验证了 feasibility：math-to-code 在 GSM8K 上有小幅正收益（+0.5–1.3pp），MATH-500 DeepSeek 为 0pp。
+> v2 目标：补全缺失 run、验证机制、做难度分层分析，使结果足够写进正文 §5 / §7。
 
 ---
 
-## 前提条件
+## 当前进展（已完成）
 
-- conda env: `code`
-- 项目根目录: `/model/tteng/CoCoder`
-- PYTHONPATH 需设为 `src`
+| 模型 | 数据集 | AR (code) | CoCoder | Δ |
+|------|--------|-----------|---------|---|
+| DeepSeek-Coder 6.7B | GSM8K | 61.0% | 62.3% | **+1.3pp** |
+| Qwen2.5-Coder 7B | GSM8K | 81.0% | 81.5% | **+0.5pp** |
+| Llama-3.1 8B | GSM8K | 74.8% | 75.8% | **+1.0pp** |
+| DeepSeek-Coder 6.7B | MATH-500 | 6.4% | 6.4% | 0pp |
+
+**对比基准（text CoT）**：DeepSeek GSM8K text 19.0%，code 61.0%（code mode 本身就显著更好）；CoCoder 在 text 上 ≈0pp，code 上 +1.3pp。
+
+**产物路径**：`outputs/math_code/`
+
+---
+
+## Phase 1：补全缺失 Run（高优先级）
+
+### 1a. MATH-500（Qwen / Llama31）
 
 ```bash
-source /home/tteng/miniconda3/etc/profile.d/conda.sh
-conda activate code
-cd /model/tteng/CoCoder
-export PYTHONPATH=src
-```
-
----
-
-## 总体流程
-
-```
-问题文本
-  → gen_math_code.py（AR 模型生成 Python 解题代码）
-  → gen_remask.py（dLLM remask 精炼代码）
-  → eval_math_code.py（exec 代码 → 提取答案 → 对比 ground truth）
-```
-
-输出格式与现有 math JSONL schema 兼容，新增 `code_solution` 字段存放 Python 代码。
-
----
-
-## Phase 1：新建生成脚本 `gen_math_code.py`
-
-**文件位置**：`src/coder/scripts/gen_math_code.py`
-
-该脚本是 `gen_math.py` 的 code-mode 变体，主要差异在 prompt 模板和输出字段。
-
-### Prompt 模板
-
-**GSM8K**（答案为整数/小数，`print` 最终结果）：
-
-```python
-GSM8K_CODE_PROMPT = """\
-Write a Python function `solution()` that solves the following math problem.
-The function must return a single numeric value (int or float).
-Do NOT use input(). Do NOT print inside the function.
-Only output the function definition, no extra text.
-
-Problem: {question}
-
-def solution():
-"""
-```
-
-**MATH-500**（答案可能是分数/表达式，用 `sympy` 或直接 return；return 值转 str 后与 ground truth 对比）：
-
-```python
-MATH500_CODE_PROMPT = """\
-Write a Python function `solution()` that solves the following math problem.
-The function must return the exact answer as a string or number.
-You may use sympy. Do NOT use input(). Do NOT print.
-Only output the function definition, no extra text.
-
-Problem: {question}
-
-def solution():
-"""
-```
-
-### 输出 JSONL Schema
-
-每条记录在现有 `gen_math.py` schema 基础上，`raw_completion` 存放模型生成的函数体（不含 `def solution():` 行，或含，均可，eval 脚本统一处理），新增：
-
-```json
-{
-  "id": "gsm8k/0",
-  "sample_id": 0,
-  "question": "...",
-  "prompt": "...",
-  "answer_ref": "72",
-  "raw_completion": "    result = 3 * 24\n    return result\n",
-  "code_mode": true,
-  "model": "deepseek-coder-6.7b-instruct",
-  "dataset": "gsm8k",
-  "gen": { ... }
-}
-```
-
-### 脚本实现要点
-
-- 直接复制 `gen_math.py` 的骨架（argparse、dataset loading、sharding、resume、timing）
-- 仅替换 prompt builder 和记录的 `code_mode: true` 标记
-- `--max_new_tokens` 默认改为 512（代码比 CoT 短）
-- 模型列表与 `gen_math.py` 保持一致（deepseek/qwen/llama31/dream/llada 等）
-
-### 运行命令
-
-```bash
-# ── GSM8K ──────────────────────────────────────────────────────────────────
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model deepseek --dataset gsm8k \
-  --out outputs/math_code/deepseek_gsm8k_code.jsonl --max_new_tokens 512
-
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model qwen --dataset gsm8k \
-  --out outputs/math_code/qwen_gsm8k_code.jsonl
-
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model llama31 --dataset gsm8k \
-  --out outputs/math_code/llama31_gsm8k_code.jsonl
-
-# ── MATH-500 ────────────────────────────────────────────────────────────────
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model deepseek --dataset math500 \
-  --out outputs/math_code/deepseek_math500_code.jsonl --max_new_tokens 512
-
+# AR baseline
 CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
   --model qwen --dataset math500 \
-  --out outputs/math_code/qwen_math500_code.jsonl
+  --out outputs/math_code/qwen_math500_code.jsonl --max_new_tokens 512
 
 CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
   --model llama31 --dataset math500 \
-  --out outputs/math_code/llama31_math500_code.jsonl
+  --out outputs/math_code/llama31_math500_code.jsonl --max_new_tokens 512
 
-# ── AIME 2022-2024（90 题，整数答案）────────────────────────────────────────
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model deepseek --dataset aime \
-  --out outputs/math_code/deepseek_aime_code.jsonl --max_new_tokens 512
+# CoCoder
+CUDA_VISIBLE_DEVICES=1 python -m coder.scripts.gen_remask \
+  --ar_outputs outputs/math_code/qwen_math500_code.jsonl \
+  --refiner dream --confidence_threshold 0.9 \
+  --out outputs/math_code/qwen_math500_code_dream_t0.9.jsonl --dataset math
 
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model qwen --dataset aime \
-  --out outputs/math_code/qwen_aime_code.jsonl
+CUDA_VISIBLE_DEVICES=1 python -m coder.scripts.gen_remask \
+  --ar_outputs outputs/math_code/llama31_math500_code.jsonl \
+  --refiner dream --confidence_threshold 0.9 \
+  --out outputs/math_code/llama31_math500_code_dream_t0.9.jsonl --dataset math
 
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model llama31 --dataset aime \
-  --out outputs/math_code/llama31_aime_code.jsonl
-
-# ── AIME 2025（30 题，最新竞赛）────────────────────────────────────────────
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model deepseek --dataset aime2025 \
-  --out outputs/math_code/deepseek_aime2025_code.jsonl --max_new_tokens 512
-
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model qwen --dataset aime2025 \
-  --out outputs/math_code/qwen_aime2025_code.jsonl
-
-CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
-  --model llama31 --dataset aime2025 \
-  --out outputs/math_code/llama31_aime2025_code.jsonl
+# Eval
+python -m coder.scripts.eval_math_code \
+  --input outputs/math_code/qwen_math500_code.jsonl \
+  --out   outputs/math_code/qwen_math500_code_eval.json
+python -m coder.scripts.eval_math_code \
+  --input outputs/math_code/qwen_math500_code_dream_t0.9.jsonl \
+  --out   outputs/math_code/qwen_math500_code_dream_t0.9_eval.json
+python -m coder.scripts.eval_math_code \
+  --input outputs/math_code/llama31_math500_code.jsonl \
+  --out   outputs/math_code/llama31_math500_code_eval.json
+python -m coder.scripts.eval_math_code \
+  --input outputs/math_code/llama31_math500_code_dream_t0.9.jsonl \
+  --out   outputs/math_code/llama31_math500_code_dream_t0.9_eval.json
 ```
 
-产物：`outputs/math_code/<model>_<dataset>_code.jsonl`
-
----
-
-## Phase 2：gen_remask.py 兼容 code_mode
-
-**现有 `gen_remask.py` 已支持 math JSONL**（见文件头注释），但 code_mode 的差异在于：
-
-- `raw_completion` 是 Python 代码，不含 `#### answer` 或 `\boxed{}`
-- remask 应作用在函数体 token 上，不需要特殊改动——现有逻辑已按 completion token 全局 remask
-
-**需要检查**：`gen_remask.py` 处理 math 记录时是否正确透传 `code_mode` 字段。如果没有，在 output record 中补上即可（评测脚本需要该字段区分 code/text 模式）。
-
-### 运行命令
+### 1b. AIME 2022–2024（3 模型）
 
 ```bash
-# 模板：<model> × <dataset>，dataset ∈ {gsm8k, math500, aime, aime2025}
-CUDA_VISIBLE_DEVICES=1 python -m coder.scripts.gen_remask \
-  --ar_outputs outputs/math_code/<model>_<dataset>_code.jsonl \
-  --refiner dream \
-  --confidence_threshold 0.9 \
-  --out outputs/math_code/<model>_<dataset>_code_dream_t0.9.jsonl \
-  --dataset math
+for MODEL in deepseek qwen llama31; do
+  CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
+    --model $MODEL --dataset aime \
+    --out outputs/math_code/${MODEL}_aime_code.jsonl --max_new_tokens 512
 
-# 具体示例：
-CUDA_VISIBLE_DEVICES=1 python -m coder.scripts.gen_remask \
-  --ar_outputs outputs/math_code/deepseek_aime_code.jsonl \
-  --refiner dream --confidence_threshold 0.9 \
-  --out outputs/math_code/deepseek_aime_code_dream_t0.9.jsonl \
-  --dataset math
+  CUDA_VISIBLE_DEVICES=1 python -m coder.scripts.gen_remask \
+    --ar_outputs outputs/math_code/${MODEL}_aime_code.jsonl \
+    --refiner dream --confidence_threshold 0.9 \
+    --out outputs/math_code/${MODEL}_aime_code_dream_t0.9.jsonl --dataset math
 
-CUDA_VISIBLE_DEVICES=1 python -m coder.scripts.gen_remask \
-  --ar_outputs outputs/math_code/deepseek_aime2025_code.jsonl \
-  --refiner dream --confidence_threshold 0.9 \
-  --out outputs/math_code/deepseek_aime2025_code_dream_t0.9.jsonl \
-  --dataset math
+  python -m coder.scripts.eval_math_code \
+    --input outputs/math_code/${MODEL}_aime_code.jsonl \
+    --out   outputs/math_code/${MODEL}_aime_code_eval.json
+  python -m coder.scripts.eval_math_code \
+    --input outputs/math_code/${MODEL}_aime_code_dream_t0.9.jsonl \
+    --out   outputs/math_code/${MODEL}_aime_code_dream_t0.9_eval.json
+done
 ```
 
----
-
-## Phase 3：新建评测脚本 `eval_math_code.py`
-
-**文件位置**：`src/coder/scripts/eval_math_code.py`
-
-该脚本 exec 模型生成的 `solution()` 函数，提取返回值，与 `answer_ref` 对比。
-
-### 核心逻辑
-
-```python
-import ast, math, signal, contextlib
-from fractions import Fraction
-
-TIMEOUT_S = 5
-
-def exec_solution(code: str) -> str | None:
-    """
-    Reconstruct full function, exec in sandbox, call solution(), return str(result).
-    Returns None on any exception or timeout.
-    """
-    # Normalize: prepend 'def solution():\n' if missing
-    if not code.strip().startswith("def solution"):
-        code = "def solution():\n" + code
-
-    namespace = {}
-    try:
-        with time_limit(TIMEOUT_S):
-            exec(compile(code, "<math_solution>", "exec"), namespace)
-            result = namespace["solution"]()
-            return str(result).strip()
-    except Exception:
-        return None
-
-
-def normalize_answer(s: str) -> str:
-    """Strip whitespace, remove trailing .0, normalize LaTeX fractions."""
-    s = s.strip()
-    # "72.0" → "72"
-    try:
-        f = float(s)
-        if f == int(f):
-            return str(int(f))
-        return str(f)
-    except ValueError:
-        pass
-    # LaTeX: \frac{1}{2} → "1/2" (rough)
-    s = s.replace("\\frac{", "").replace("}{", "/").replace("}", "")
-    return s
-
-
-def answers_match(pred: str, ref: str) -> bool:
-    pred_n = normalize_answer(pred)
-    ref_n = normalize_answer(ref)
-    if pred_n == ref_n:
-        return True
-    # Try numeric equality with tolerance
-    try:
-        return math.isclose(float(pred_n), float(ref_n), rel_tol=1e-6)
-    except (ValueError, TypeError):
-        return False
-```
-
-### 评测流程
-
-```python
-records = read_jsonl(args.input)
-results = []
-for rec in records:
-    completion = rec.get("raw_completion", "")   # or "draft_completion" for remask output
-    pred = exec_solution(completion)
-    ref = rec["answer_ref"]
-    correct = answers_match(pred, ref) if pred is not None else False
-    results.append({"id": rec["id"], "correct": correct, "pred": pred, "ref": ref})
-
-acc = sum(r["correct"] for r in results) / len(results)
-print(f"accuracy: {acc:.1%}  ({sum(r['correct'] for r in results)}/{len(results)})")
-```
-
-### CLI
+### 1c. AIME 2025（3 模型）
 
 ```bash
-# 评测 AR baseline（通用模板，dataset 自动从 id 推断）
-python -m coder.scripts.eval_math_code \
-  --input outputs/math_code/<model>_<dataset>_code.jsonl \
-  --out   outputs/math_code/<model>_<dataset>_code_eval.json
+for MODEL in deepseek qwen llama31; do
+  CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.gen_math_code \
+    --model $MODEL --dataset aime2025 \
+    --out outputs/math_code/${MODEL}_aime2025_code.jsonl --max_new_tokens 512
 
-# AIME 示例
-python -m coder.scripts.eval_math_code \
-  --input outputs/math_code/deepseek_aime_code.jsonl \
-  --out   outputs/math_code/deepseek_aime_code_eval.json
+  CUDA_VISIBLE_DEVICES=1 python -m coder.scripts.gen_remask \
+    --ar_outputs outputs/math_code/${MODEL}_aime2025_code.jsonl \
+    --refiner dream --confidence_threshold 0.9 \
+    --out outputs/math_code/${MODEL}_aime2025_code_dream_t0.9.jsonl --dataset math
 
-python -m coder.scripts.eval_math_code \
-  --input outputs/math_code/deepseek_aime2025_code.jsonl \
-  --out   outputs/math_code/deepseek_aime2025_code_eval.json
-
-# 评测 remask 后的结果
-python -m coder.scripts.eval_math_code \
-  --input outputs/math_code/deepseek_aime_code_dream_t0.9.jsonl \
-  --out   outputs/math_code/deepseek_aime_code_dream_t0.9_eval.json
+  python -m coder.scripts.eval_math_code \
+    --input outputs/math_code/${MODEL}_aime2025_code.jsonl \
+    --out   outputs/math_code/${MODEL}_aime2025_code_eval.json
+  python -m coder.scripts.eval_math_code \
+    --input outputs/math_code/${MODEL}_aime2025_code_dream_t0.9.jsonl \
+    --out   outputs/math_code/${MODEL}_aime2025_code_dream_t0.9_eval.json
+done
 ```
 
-`--completion_field` 默认 `raw_completion`；AIME 答案为整数，由 `infer_dataset()` 自动路由到 `answers_match_gsm8k()`（整数归一化）。
-
-**注意**：`AI-MO/aimo-validation-aime` 的 `answer` 字段为整数字符串（如 `"365"`），加载时已规范化。如果 HuggingFace 字段名有变化（`solution` 而非 `answer`），需在 `load_aime()` 中调整提取逻辑。
+**预期产物**：12 个新 eval.json（MATH-500×2 + AIME×3 + AIME2025×3，各含 AR/CoCoder）
 
 ---
 
-## Phase 4：补全 results_table 集成 ✅
+## Phase 2：机制验证——Fault Detection Ratio on Math Code ✅ DONE
 
-`gen_results_table.py` 已实现 `section_math_code()`，包含四列：
+> **核心假设**：math-to-code 之所以比 text CoT 效果好，是因为 Python 代码的结构性错误比自然语言算术错误更容易被 dLLM confidence 检测到。
+>
+> **结果（2026-06-14）**：假设被**否定**。
 
-| 模型 | GSM8K acc% | MATH-500 acc% | AIME acc% | AIME-2025 acc% |
-|---|---|---|---|---|
-| DeepSeek-Coder 6.7B | — | — | — | — |
-| Qwen2.5-Coder 7B | — | — | — | — |
-| Llama-3.1 8B | — | — | — | — |
-| *(CoCoder rows)* | — | — | — | — |
+| 模型 | pairs | fault conf | nonfault conf | ratio | 对比 |
+|------|-------|-----------|--------------|-------|------|
+| DeepSeek GSM8K (≤500ch) | 20 | 0.898 | 0.958 | **1.1×** | text CoT = 1.15× |
+| Qwen GSM8K (≤60ch) | 10 | 0.807 | 0.927 | **1.15×** | |
+| Llama-3.1 GSM8K (≤60ch) | 21 | 0.478 | 0.953 | **2.0×** | coding = 23–126× |
 
-产物不存在时自动 fallback `—`，无需手动修改。
+> **结论**：math code 的 fault detection ratio 与 text CoT 相同（1.1–2.0×），远低于纯代码任务（23–126×）。dLLM 无法区分 math code 中的算术/概念错误。
+>
+> **Note on deepseek pairs**: deepseek 的最小 diff 为 197 chars（math fix 需要整句改写），比 coding 任务的 token 级修改大得多。用 ≤500ch 才找到 20 对。
+>
+> **推论**：GSM8K 上 +0.5–1.3pp 的收益**不来自 locator**，应来自 rewriter 的 self-rewrite 效果（待 Phase 2b self-rewrite baseline 确认）。
+
+### Step 2a：收集"改动样本"
+
+从 DeepSeek GSM8K 结果中筛选 **AR 失败，CoCoder 成功** 的样本：
+
+```python
+import json, difflib, pathlib
+
+ar_recs   = {r['id']: r for r in map(json.loads,
+             pathlib.Path('outputs/math_code/deepseek_gsm8k_code.jsonl').read_text().splitlines()) if r.strip() if r}
+col_recs  = {r['id']: r for r in map(json.loads,
+             pathlib.Path('outputs/math_code/deepseek_gsm8k_code_dream_t0.9.jsonl').read_text().splitlines()) if r}
+ar_eval   = {r['id']: r for r in json.load(open('outputs/math_code/deepseek_gsm8k_code_eval.json'))['results']}
+col_eval  = {r['id']: r for r in json.load(open('outputs/math_code/deepseek_gsm8k_code_dream_t0.9_eval.json'))['results']}
+
+corrected_pairs = []
+for rid in ar_recs:
+    if not ar_eval.get(rid, {}).get('correct') and col_eval.get(rid, {}).get('correct'):
+        draft = ar_recs[rid].get('raw_completion', '')
+        fixed = col_recs[rid].get('raw_completion', '')
+        sm = difflib.SequenceMatcher(None, draft, fixed, autojunk=False)
+        diff_len = sum(a1-a0 for op,a0,a1,b0,b1 in sm.get_opcodes() if op != 'equal')
+        if 1 <= diff_len <= 30:
+            corrected_pairs.append({'id': rid, 'draft': draft, 'fixed': fixed, 'diff_len': diff_len})
+
+print(f'Surgical corrected pairs: {len(corrected_pairs)}')
+```
+
+### Step 2b：计算 Fault Detection Ratio（需要 GPU）
+
+复用 `locator_scoring.py` 逻辑，或新建 `math_code_locator_ratio.py`：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m coder.scripts.math_code_locator_ratio \
+  --ar_file    outputs/math_code/deepseek_gsm8k_code.jsonl \
+  --collab_file outputs/math_code/deepseek_gsm8k_code_dream_t0.9.jsonl \
+  --ar_eval    outputs/math_code/deepseek_gsm8k_code_eval.json \
+  --col_eval   outputs/math_code/deepseek_gsm8k_code_dream_t0.9_eval.json \
+  --locator dream \
+  --out outputs/math_code/deepseek_gsm8k_code_locator_ratio.json
+```
+
+**期望输出**：
+
+```json
+{
+  "n_pairs": 18,
+  "fault_tokens": 22,
+  "mean_fault_conf": 0.18,
+  "mean_nonfault_conf": 0.91,
+  "ratio": 5.1,
+  "ar_ratio": 1.2
+}
+```
+
+**解读阈值**：
+- ratio < 3×：math code 与 text CoT 无本质区别，增益来自偶然
+- ratio 3–10×：code structure 部分恢复了 dLLM 信号，增益可解释
+- ratio > 10×：接近 code 任务，增益机制与代码任务相同
+
+---
+
+## Phase 3：MATH-500 难度分层分析
+
+MATH-500 每道题带有 `level`（1–5）和 `type`（Algebra / Geometry 等）字段。
+
+### Step 3a：分层统计 DeepSeek MATH-500 现有结果
+
+```python
+import json
+
+records = json.load(open('outputs/math_code/deepseek_math500_code_eval.json'))['results']
+# 加载原始数据集获取 level/type
+from datasets import load_dataset
+ds = load_dataset('HuggingFaceH4/MATH-500', split='test')
+meta = {str(i): {'level': ds[i]['level'], 'type': ds[i]['type']} for i in range(len(ds))}
+
+ar_results  = {r['id']: r['correct'] for r in records}
+col_records = json.load(open('outputs/math_code/deepseek_math500_code_dream_t0.9_eval.json'))['results']
+col_results = {r['id']: r['correct'] for r in col_records}
+
+from collections import defaultdict
+by_level = defaultdict(lambda: {'ar': [], 'col': []})
+for rid, m in meta.items():
+    lv = m['level']
+    by_level[lv]['ar'].append(ar_results.get(rid, False))
+    by_level[lv]['col'].append(col_results.get(rid, False))
+
+for lv in sorted(by_level):
+    ar_acc  = sum(by_level[lv]['ar'])  / len(by_level[lv]['ar'])
+    col_acc = sum(by_level[lv]['col']) / len(by_level[lv]['col'])
+    n = len(by_level[lv]['ar'])
+    print(f'Level {lv}  n={n}  AR={ar_acc:.1%}  CoCoder={col_acc:.1%}  Δ={col_acc-ar_acc:+.1%}')
+```
+
+**假设**：Level 1–2（结构简单，代码逻辑错误多）→ 更高 Δ；Level 4–5（概念/推理错误）→ Δ ≈ 0
+
+### Step 3b：对新增 Qwen / Llama31 MATH-500 结果做同样分层
+
+---
+
+## Phase 4：CoT vs Code 全对比表
+
+补全后，生成完整对比表：
+
+| 模型 | 数据集 | Text CoT AR | **Code AR** | Code CoCoder | Δ (code CoCoder vs CoT AR) |
+|------|--------|------------|-------------|-------------|--------------------------|
+| DeepSeek | GSM8K | 19.0% | 61.0% | 62.3% | +43.3pp |
+| Qwen | GSM8K | 30.6% | 81.0% | 81.5% | +50.9pp |
+| Llama-3.1 | GSM8K | 84.5% | 74.8% | 75.8% | −8.7pp |
+| DeepSeek | MATH-500 | 4.6% | 6.4% | 6.4% | +1.8pp |
+| Qwen | MATH-500 | 37.6% | — | — | — |
+| Llama-3.1 | MATH-500 | 38.6% | — | — | — |
+| DeepSeek | AIME | — | — | — | — |
+| Qwen | AIME | — | — | — | — |
+| Llama-3.1 | AIME | — | — | — | — |
+
+> Llama-3.1 text CoT 84.5%（GSM8K）是因为 Llama 的 instruction-following 在 CoT 上已很强；code mode 反而弱，这与 DeepSeek/Qwen 模式不同，值得说明。
+
+---
+
+## Phase 5：Paper 写入计划
+
+### §5 Experiments（新增 math-to-code 结果）
+
+在现有 math 段落后补一段：
+
+```
+We also evaluate a \emph{code-mode} variant in which the AR model generates Python
+code to solve math problems (rather than chain-of-thought text), and CoCoder refines
+the code. Table~\ref{tab:math_code} shows that code-mode substantially improves the
+baseline accuracy on GSM8K for DeepSeek (61.0\% vs.\ 19.0\%) and yields consistent
+CoCoder gains of +0.5--1.3\,pp. Harder benchmarks (MATH-500, AIME) show near-zero
+improvement, consistent with the fault-detection ratio analysis below.
+```
+
+### §7 Discussion（更新 boundary conditions 段）
+
+在 SQL 段之后补：
+
+```
+A partial remedy exists for mathematical reasoning: translating problems into Python
+code (``math-to-code'') restores some structural signal---the fault-detection ratio
+rises from 1.15$\times$ (text CoT) to approximately X$\times$ (code), yielding
++0.5--1.3\,pp on GSM8K.
+However, gains vanish on harder benchmarks (MATH-500 Level 4--5, AIME), where errors
+are conceptual rather than syntactic: a wrong formula such as \texttt{area = l * l}
+instead of \texttt{area = l * w} is locally plausible Python, even if the variable
+names are visible in context.
+The boundary therefore lies not at the code/text divide, but at the
+structural/conceptual divide within code.
+```
+
+---
+
+## 完成标准检查表
+
+### Phase 1（补 run）✅ ALL DONE
+- [x] MATH-500: Qwen AR + CoCoder
+- [x] MATH-500: Llama31 AR + CoCoder
+- [x] AIME: DeepSeek / Qwen / Llama31 AR + CoCoder
+- [x] AIME-2025: DeepSeek / Qwen / Llama31 AR + CoCoder
+
+### Phase 2a（fault detection ratio）✅ DONE
+- [x] DeepSeek GSM8K ratio = 1.1× (≤500ch pairs)
+- [x] Qwen GSM8K ratio = 1.15× (≤60ch)
+- [x] Llama31 GSM8K ratio = 2.0× (≤60ch)
+- [x] 结论：math code ratio ≈ text CoT，dLLM locator 无效于概念性错误
+
+### Phase 2b（self-rewrite baseline）🔄 RUNNING
+- [ ] deepseek self-rewrite: GSM8K / MATH-500 / AIME / AIME-2025（GPU 1）
+- [ ] qwen self-rewrite: GSM8K / MATH-500 / AIME / AIME-2025（GPU 3）
+- [ ] llama31 self-rewrite: GSM8K / MATH-500 / AIME / AIME-2025（GPU 4）
+- [ ] 若 self-rewrite Δ ≈ CoCoder Δ → gain 来自 rewriter not locator
+- [ ] 若 self-rewrite Δ ≈ 0 → gain 可能来自 dLLM rewriter 质量（非 locator 信号）
+
+### Phase 3（难度分层）
+- [ ] DeepSeek MATH-500 by level (1–5)
+- [ ] Qwen / Llama31 MATH-500 by level（在 Phase 1 完成后）
+
+### Phase 4（全表）
+- [ ] 完整 CoT vs Code 对比表写入 results.md
+
+### Phase 5（论文）
+- [ ] §5 math-to-code 段落
+- [ ] §7 boundary conditions 更新（填入 ratio 数值）
+- [ ] tab:math_code LaTeX 表格
 
 ---
 
@@ -337,30 +319,12 @@ python -m coder.scripts.eval_math_code \
 
 ```
 outputs/math_code/
-  # AR 草稿（code mode） — dataset ∈ {gsm8k, math500, aime, aime2025}
-  deepseek_{dataset}_code.jsonl
-  qwen_{dataset}_code.jsonl
-  llama31_{dataset}_code.jsonl
-
-  # remask 精炼
-  deepseek_{dataset}_code_dream_t0.9.jsonl
-  qwen_{dataset}_code_dream_t0.9.jsonl
-  llama31_{dataset}_code_dream_t0.9.jsonl
-
-  # eval 结果
-  deepseek_{dataset}_code_eval.json
-  deepseek_{dataset}_code_dream_t0.9_eval.json
-  ...
+  {model}_{dataset}_code.jsonl               # AR 草稿
+  {model}_{dataset}_code_dream_t0.9.jsonl    # CoCoder 输出
+  {model}_{dataset}_code_eval.json           # AR eval
+  {model}_{dataset}_code_dream_t0.9_eval.json # CoCoder eval
+  deepseek_gsm8k_code_locator_ratio.json     # Phase 2 fault detection ratio
 ```
 
----
-
-## 完成标准
-
-- [x] `gen_math_code.py` 支持 gsm8k / math500 / aime / aime2025 四个数据集
-- [x] `eval_math_code.py` 支持 exec 沙箱 + 四数据集类型推断 + AIME 整数答案匹配
-- [x] `gen_remask.py` 对 code_mode JSONL 正确透传字段（`out_rec = dict(rec)`）
-- [x] `gen_results_table.py` section_math_code() 含 GSM8K / MATH500 / AIME / AIME-2025 四列
-- [ ] 实际跑 AR baseline（等待 GPU）：预期 DeepSeek GSM8K code-mode ~50-60%，AIME ~5-15%
-- [ ] 跑 remask 并对比 AR baseline delta
-- [ ] 验证 `AI-MO/aimo-validation-aime` 的 `answer` 字段名称（可能为 `solution`，需按实际调整 `load_aime()`）
+model ∈ {deepseek, qwen, llama31}
+dataset ∈ {gsm8k, math500, aime, aime2025}

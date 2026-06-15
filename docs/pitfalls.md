@@ -195,3 +195,120 @@ dLLM confidence (token-level or sentence-level) as a math CoT error locator **is
 Adapters should:
 - Pass `src_mask` (if the model interface supports it)
 - Use steps/temp/top_p close to official defaults (steps is denoising steps, not max_new_tokens)
+
+---
+
+## Run Scripts: Environment Paths (wjzhang machine vs tteng server)
+
+### Symptom
+
+Scripts that ran on the tteng compute server fail immediately with:
+
+```
+/home/tteng/miniconda3/etc/profile.d/conda.sh: No such file or directory
+```
+
+### Root Cause
+
+Old scripts were written for the `tteng` server environment:
+- conda: `/home/tteng/miniconda3/`
+- project root: `/model/tteng/CoCoder`
+- conda env name: `code`
+
+On the wjzhang machine these paths do not exist.
+
+### Fix
+
+Replace with wjzhang-machine paths:
+
+| Old | New |
+|-----|-----|
+| `/home/tteng/miniconda3/etc/profile.d/conda.sh` | `/home/wjzhang/miniforge3/etc/profile.d/conda.sh` |
+| `conda activate code` | `conda activate cocoder` |
+| `cd /model/tteng/CoCoder` | `cd /home/wjzhang/tt_workspace/model/CoCoder/CoCoder` |
+| `PYTHONPATH="/model/tteng/CoCoder/src:..."` | `PYTHONPATH="/home/wjzhang/tt_workspace/model/CoCoder/CoCoder/src:..."` |
+
+Quick batch fix:
+
+```bash
+sed -i \
+  -e 's|/home/tteng/miniconda3|/home/wjzhang/miniforge3|g' \
+  -e 's|conda activate code|conda activate cocoder|g' \
+  -e 's|cd /model/tteng/CoCoder|cd /home/wjzhang/tt_workspace/model/CoCoder/CoCoder|g' \
+  -e 's|PYTHONPATH="/model/tteng/CoCoder/src|PYTHONPATH="/home/wjzhang/tt_workspace/model/CoCoder/CoCoder/src|g' \
+  <script>.sh
+```
+
+---
+
+## `gen_math_code.py`: `NameError: load_dataset is not defined` on AIME datasets
+
+### Symptom
+
+```
+NameError: name 'load_dataset' is not defined
+```
+
+when running `--dataset aime` or `--dataset aime2025`.
+
+### Root Cause
+
+`gen_math_code.py` defines `load_aime()` and `load_aime2025()` which call `load_dataset(...)` internally, but the file only imported `load_gsm8k`, `load_math500` etc. from `gen_math` — it never imported `load_dataset` from `datasets` directly.
+
+### Fix
+
+Already fixed: added `from datasets import load_dataset` to the top of `gen_math_code.py`.
+
+---
+
+## `llama31` Model: Gated HuggingFace Repo (wjzhang machine)
+
+### Symptom
+
+```
+OSError: You are trying to access a gated repo.
+Make sure to have access to it at https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct.
+```
+
+### Root Cause
+
+`meta-llama/Llama-3.1-8B-Instruct` requires HuggingFace authentication (gated model). The wjzhang machine has no HF token (`~/.huggingface/token` does not exist) and Llama-3.1 is not in `~/.cache/huggingface/hub/`.
+
+The tteng server had Llama-3.1 cached, which is why earlier runs succeeded.
+
+### Fix Options
+
+1. **Set HF token** and accept the gated license on https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct, then:
+   ```bash
+   huggingface-cli login
+   ```
+2. **Use local path override** with `--model_id <local_path>` if a compatible model is available:
+   ```bash
+   python -m coder.scripts.gen_math_code --model llama31 \
+     --model_id /path/to/local/Llama-3.1-8B-Instruct ...
+   ```
+   Note: `Meta-Llama-3-8B-Instruct` at `/home/wjzhang/tt_workspace/model/UniMuLM/model/Meta-Llama-3-8B-Instruct` is Llama **3** (not 3.1) — results will differ from GSM8K baseline runs.
+
+### Status
+
+As of 2026-06-13, llama31 MATH-500 and llama31 AIME experiments cannot run on the wjzhang machine without one of the above fixes. Fixed by running `conda run -n cocoder huggingface-cli login --token <token>`.
+
+---
+
+## `gen_math_code.py`: `ValueError: Unknown split "test"` for AIME-2025
+
+### Symptom
+
+```
+ValueError: Unknown split "test". Should be one of ['train'].
+```
+
+when running `--dataset aime2025`.
+
+### Root Cause
+
+`load_aime2025()` called `load_dataset("MathArena/aime_2025", split="test")` but the dataset only has a `train` split.
+
+### Fix
+
+Already fixed: changed `split="test"` → `split="train"` in `gen_math_code.py`'s `load_aime2025()`.

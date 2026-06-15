@@ -41,6 +41,11 @@ class MistralCoder(CoderModel):
             tokenize=False,
         )
         inputs = self.tok(prompt, return_tensors="pt").to(self.device)
+        inputs = {
+            k: v
+            for k, v in inputs.items()
+            if k in ("input_ids", "attention_mask", "token_type_ids")
+        }
 
         if req.seed is not None:
             torch.manual_seed(req.seed)
@@ -60,4 +65,3 @@ class MistralCoder(CoderModel):
         gen_ids = out[0][inputs["input_ids"].shape[1] :]
         gen = self.tok.decode(gen_ids, skip_special_tokens=True)
         return gen.strip()
-

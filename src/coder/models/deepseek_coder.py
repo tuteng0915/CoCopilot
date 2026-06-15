@@ -1,7 +1,35 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from huggingface_hub import hf_hub_download
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 from coder.models.base import CoderModel
 from coder.utils.schema import ModelRequest
+
+
+def _decode_preserves_layout(tok) -> bool:
+    probe = "from typing import List\n\ndef f(x):\n    return x + 1\n"
+    ids = tok(probe, add_special_tokens=False).input_ids
+    return tok.decode(ids, skip_special_tokens=True) == probe
+
+
+def _load_deepseek_tokenizer(model_id: str):
+    tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    if _decode_preserves_layout(tok):
+        return tok
+
+    tokenizer_file = hf_hub_download(
+        repo_id=model_id,
+        filename="tokenizer.json",
+        local_files_only=True,
+    )
+    fast = PreTrainedTokenizerFast(tokenizer_file=tokenizer_file)
+    for attr in ("bos_token", "eos_token", "unk_token", "pad_token"):
+        value = getattr(tok, attr, None)
+        if value is not None:
+            setattr(fast, attr, value)
+    fast.chat_template = getattr(tok, "chat_template", None)
+    fast.model_max_length = getattr(tok, "model_max_length", fast.model_max_length)
+    return fast
+
 
 class DeepSeekCoder(CoderModel):
     def __init__(self, model_id: str = "deepseek-ai/deepseek-coder-6.7b-instruct", device: str = "cuda"):
@@ -10,7 +38,7 @@ class DeepSeekCoder(CoderModel):
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id, torch_dtype=torch.bfloat16, trust_remote_code=True
         ).to(device).eval()
-        self.tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        self.tok = _load_deepseek_tokenizer(model_id)
 
     @property
     def name(self) -> str:

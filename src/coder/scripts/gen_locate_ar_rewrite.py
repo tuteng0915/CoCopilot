@@ -23,9 +23,11 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 from coder.models import (
     ApiCoder,
+    CodeLlamaCoder,
     DeepSeekCoder,
     QwenCoder,
     Qwen35Coder,
@@ -39,6 +41,7 @@ from coder.models import (
     DreamCoder,
     CoderModel,
 )
+from coder.locators import get_token_char_spans
 from coder.utils.code_cleaning import build_evalplus_solution
 from coder.utils.schema import ModelRequest
 
@@ -49,6 +52,15 @@ def read_jsonl(path: str) -> Iterable[Dict[str, Any]]:
             line = line.strip()
             if line:
                 yield json.loads(line)
+
+
+def load_records_by_task_id(path: str) -> dict[str, Dict[str, Any]]:
+    records: dict[str, Dict[str, Any]] = {}
+    for rec in read_jsonl(path):
+        task_id = rec.get("task_id")
+        if isinstance(task_id, str) and task_id:
+            records[task_id] = rec
+    return records
 
 
 def build_ar_model(name: str, device: str, model_id: Optional[str]) -> CoderModel:
@@ -65,6 +77,8 @@ def build_ar_model(name: str, device: str, model_id: Optional[str]) -> CoderMode
         return StarCoder2Coder(model_id=model_id or "bigcode/starcoder2-7b", device=device)
     if name in ["mistral", "mistral_coder"]:
         return MistralCoder(model_id=model_id or "mistralai/Mistral-7B-Instruct-v0.3", device=device)
+    if name in ["codellama", "codellama_coder"]:
+        return CodeLlamaCoder(model_id=model_id or "codellama/CodeLlama-7b-Instruct-hf", device=device)
     if name in ["llama31", "llama31_coder", "llama3.1"]:
         return Llama31Coder(model_id=model_id or "meta-llama/Llama-3.1-8B-Instruct", device=device)
     if name in ["diffullama", "diffullama_coder", "dflm"]:
@@ -79,28 +93,48 @@ def build_ar_model(name: str, device: str, model_id: Optional[str]) -> CoderMode
 
 
 def mask_low_confidence_spans(
-    tok,
-    comp_ids: torch.Tensor,
+    draft: str,
+    tokenizer,
     mask_pos: torch.Tensor,
     mask_token: str = "<MASK>",
 ) -> str:
     """
-    Build a masked string by decoding tokens, but collapsing consecutive masked tokens
-    into a single `<MASK>` marker.
+    Build a masked string from original character spans, collapsing consecutive
+    masked tokens into a single `<MASK>` marker.
+
+    Do not reconstruct text by decoding individual tokenizer IDs. Some
+    tokenizers expose byte-level marker characters (for example "Ġ"/"Ċ") when
+    tokens are decoded one-by-one, which pollutes the AR rewrite prompt.
     """
-    ids = comp_ids[0].tolist()
-    mp = mask_pos.tolist()
+    spans = get_token_char_spans(tokenizer, draft)
+    mp = mask_pos.detach().cpu().bool().tolist()
     out_parts: list[str] = []
     in_mask = False
+    mask_had_newline = False
+    cursor = 0
 
-    for tid, m in zip(ids, mp):
+    for (start, end), m in zip(spans, mp):
+        start = max(0, min(int(start), len(draft)))
+        end = max(start, min(int(end), len(draft)))
         if m:
             if not in_mask:
+                out_parts.append(draft[cursor:start])
                 out_parts.append(mask_token)
                 in_mask = True
+                mask_had_newline = False
+            if "\n" in draft[start:end]:
+                mask_had_newline = True
+            cursor = max(cursor, end)
             continue
+        if in_mask and mask_had_newline:
+            out_parts.append("\n")
         in_mask = False
-        out_parts.append(tok.decode([tid], skip_special_tokens=False))
+        out_parts.append(draft[cursor:end])
+        cursor = max(cursor, end)
+
+    if in_mask and mask_had_newline:
+        out_parts.append("\n")
+    out_parts.append(draft[cursor:])
 
     return "".join(out_parts)
 
@@ -120,21 +154,73 @@ def expand_mask_span_level(mask_pos: torch.Tensor, span_merge_gap: int) -> torch
     return mp
 
 
-def expand_mask_line_level(tok, comp_ids: torch.Tensor, mask_pos: torch.Tensor) -> torch.Tensor:
-    ids = comp_ids[0].tolist()
-    line_ids: list[int] = []
-    cur_line = 0
-    for tid in ids:
-        s = tok.decode([tid], skip_special_tokens=False)
-        line_ids.append(cur_line)
-        cur_line += s.count("\n")
-    masked_lines = set()
-    for i, m in enumerate(mask_pos.tolist()):
-        if m:
-            masked_lines.add(line_ids[i])
-    if not masked_lines:
+def expand_mask_line_level(draft: str, tokenizer, mask_pos: torch.Tensor) -> torch.Tensor:
+    spans = get_token_char_spans(tokenizer, draft)
+    mask_flags = mask_pos.detach().cpu().bool().tolist()
+    line_ranges: list[tuple[int, int]] = []
+    for (start, end), m in zip(spans, mask_flags):
+        if not m:
+            continue
+        start = max(0, min(int(start), len(draft)))
+        end = max(start, min(int(end), len(draft)))
+        line_start = draft.rfind("\n", 0, start) + 1
+        next_newline = draft.find("\n", end)
+        line_end = len(draft) if next_newline == -1 else next_newline + 1
+        line_ranges.append((line_start, line_end))
+
+    if not line_ranges:
         return mask_pos
-    return torch.tensor([ln in masked_lines for ln in line_ids], device=mask_pos.device, dtype=torch.bool)
+
+    expanded = []
+    for start, end in spans:
+        start = max(0, min(int(start), len(draft)))
+        end = max(start, min(int(end), len(draft)))
+        expanded.append(any(line_end > start and line_start < end for line_start, line_end in line_ranges))
+    return torch.tensor(expanded, device=mask_pos.device, dtype=torch.bool)
+
+
+def infer_mask_pos_from_masked_draft(
+    draft: str,
+    masked_draft: str,
+    tokenizer,
+    mask_token: str,
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Recover token mask positions from a precomputed masked draft string."""
+    spans = get_token_char_spans(tokenizer, draft)
+    intervals: list[tuple[int, int]] = []
+    cursor = 0
+    parts = masked_draft.split(mask_token)
+
+    for idx, literal in enumerate(parts):
+        if idx == 0:
+            if literal:
+                found = draft.find(literal, cursor)
+                if found > cursor:
+                    intervals.append((cursor, found))
+                cursor = (found + len(literal)) if found >= 0 else cursor
+            continue
+
+        if literal:
+            found = draft.find(literal, cursor)
+            if found < 0:
+                found = cursor
+            if found > cursor:
+                intervals.append((cursor, found))
+            cursor = found + len(literal)
+
+    if masked_draft.endswith(mask_token) and cursor < len(draft):
+        intervals.append((cursor, len(draft)))
+
+    mask_flags = []
+    for start, end in spans:
+        start = max(0, min(int(start), len(draft)))
+        end = max(start, min(int(end), len(draft)))
+        mask_flags.append(any(mask_end > start and mask_start < end for mask_start, mask_end in intervals))
+
+    comp_ids = tokenizer(draft, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+    mask_pos = torch.tensor(mask_flags, device=device, dtype=torch.bool)
+    return comp_ids, mask_pos
 
 
 def compute_mask_positions(
@@ -185,9 +271,24 @@ def main() -> None:
 
     ap.add_argument("--locator_model_id", default="Dream-org/Dream-Coder-v0-Instruct-7B")
     ap.add_argument("--locator_device", default="cuda")
+    ap.add_argument(
+        "--mask_source",
+        default=None,
+        help=(
+            "Optional JSONL from a previous locate+rewrite run. When provided, "
+            "reuse its token-level masked_draft decisions instead of rescoring "
+            "with the locator model; useful for expanding token masks to span/line."
+        ),
+    )
 
     ap.add_argument("--ar_model", required=True, help="AR backbone to do rewrite (e.g., deepseek|qwen|api|llama31).")
-    ap.add_argument("--ar_model_id", default=None, help="Override AR HuggingFace model id / API model id.")
+    ap.add_argument(
+        "--ar_model_id",
+        "--model_id",
+        dest="ar_model_id",
+        default=None,
+        help="Override AR HuggingFace model id / API model id.",
+    )
     ap.add_argument("--ar_device", default="cuda")
 
     # Masking policy (use exactly one)
@@ -241,7 +342,19 @@ def main() -> None:
                 done_ids.add(tid)
         print(f"[resume] skipping {len(done_ids)} already-done tasks.")
 
-    locator = DreamCoder(model_id=args.locator_model_id, device=args.locator_device)
+    mask_source_by_id = load_records_by_task_id(args.mask_source) if args.mask_source else {}
+    if args.mask_source and args.rounds != 1:
+        ap.error("--mask_source currently supports --rounds 1 only.")
+
+    if args.mask_source:
+        locator = None
+        locator_tok = AutoTokenizer.from_pretrained(args.locator_model_id, trust_remote_code=True)
+        if locator_tok.pad_token is None and locator_tok.eos_token is not None:
+            locator_tok.pad_token = locator_tok.eos_token
+        print(f"[mask_source] loaded {len(mask_source_by_id)} records from {args.mask_source}")
+    else:
+        locator = DreamCoder(model_id=args.locator_model_id, device=args.locator_device)
+        locator_tok = locator.tok
     ar_model = build_ar_model(args.ar_model, device=args.ar_device, model_id=args.ar_model_id)
 
     records = list(read_jsonl(args.input))
@@ -276,13 +389,36 @@ def main() -> None:
 
             for r in range(int(args.rounds)):
                 t_loc0 = time.perf_counter()
-                comp_ids, confidence, mask_pos = compute_mask_positions(
-                    locator=locator,
-                    prompt=prompt_text,
-                    draft=cur,
-                    confidence_threshold=float(args.confidence_threshold),
-                    mask_ratio=args.mask_ratio,
-                )
+                if args.mask_source:
+                    src_rec = mask_source_by_id.get(task_id)
+                    if not src_rec:
+                        print(f"[warn] {task_id}: missing --mask_source record; leaving draft unmasked.")
+                        comp_ids = locator_tok(cur, return_tensors="pt", add_special_tokens=False).input_ids.to(args.ar_device)
+                        mask_pos = torch.zeros(comp_ids.shape[1], device=args.ar_device, dtype=torch.bool)
+                    else:
+                        source_draft = (
+                            src_rec.get("draft_completion")
+                            or ((src_rec.get("rounds_trace") or [{}])[0].get("input_draft"))
+                            or cur
+                        )
+                        if source_draft != cur:
+                            cur = source_draft
+                        comp_ids, mask_pos = infer_mask_pos_from_masked_draft(
+                            draft=cur,
+                            masked_draft=src_rec.get("masked_draft", cur),
+                            tokenizer=locator_tok,
+                            mask_token=args.mask_token,
+                            device=args.ar_device,
+                        )
+                    confidence = torch.ones(mask_pos.numel(), device=args.ar_device)
+                else:
+                    comp_ids, confidence, mask_pos = compute_mask_positions(
+                        locator=locator,
+                        prompt=prompt_text,
+                        draft=cur,
+                        confidence_threshold=float(args.confidence_threshold),
+                        mask_ratio=args.mask_ratio,
+                    )
                 t_loc1 = time.perf_counter()
 
                 t_mb0 = time.perf_counter()
@@ -292,11 +428,11 @@ def main() -> None:
                     if gran == "span":
                         mp = expand_mask_span_level(mask_pos=mp, span_merge_gap=args.span_merge_gap)
                     elif gran == "line":
-                        mp = expand_mask_line_level(tok=locator.tok, comp_ids=comp_ids, mask_pos=mp)
+                        mp = expand_mask_line_level(draft=cur, tokenizer=locator_tok, mask_pos=mp)
 
                     masked_draft = mask_low_confidence_spans(
-                        tok=locator.tok,
-                        comp_ids=comp_ids,
+                        draft=cur,
+                        tokenizer=locator_tok,
                         mask_pos=mp,
                         mask_token=args.mask_token,
                     )
@@ -377,6 +513,7 @@ def main() -> None:
                 "gen": {
                     "source_model": rec.get("model", "unknown"),
                     "locator_model": args.locator_model_id,
+                    "mask_source": args.mask_source,
                     "ar_model": ar_model.name,
                     "confidence_threshold": args.confidence_threshold,
                     "mask_ratio": args.mask_ratio,

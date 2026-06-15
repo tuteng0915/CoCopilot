@@ -11,7 +11,16 @@ from tqdm import tqdm
 
 from coder.utils.code_cleaning import build_evalplus_solution
 from coder.utils.schema import ModelRequest
-from coder.models import DeepSeekCoder, QwenCoder, Llama31Coder, StarCoder2Coder, CoderModel
+from coder.models import (
+    CodeLlamaCoder,
+    DeepSeekCoder,
+    Llama31Coder,
+    MistralCoder,
+    QwenCoder,
+    SeedCoder,
+    StarCoder2Coder,
+    CoderModel,
+)
 
 
 def read_jsonl(path: str) -> Iterable[Dict[str, Any]]:
@@ -42,6 +51,21 @@ def build_model(name: str, device: str, model_id: str | None) -> CoderModel:
     if name in ["starcoder2", "starcoder2_coder", "sc2"]:
         return StarCoder2Coder(
             model_id=model_id or "bigcode/starcoder2-7b",
+            device=device,
+        )
+    if name in ["codellama", "codellama_coder"]:
+        return CodeLlamaCoder(
+            model_id=model_id or "codellama/CodeLlama-7b-Instruct-hf",
+            device=device,
+        )
+    if name in ["mistral", "mistral_coder"]:
+        return MistralCoder(
+            model_id=model_id or "mistralai/Mistral-7B-Instruct-v0.3",
+            device=device,
+        )
+    if name in ["seed-coder", "seed_coder", "seedcoder"]:
+        return SeedCoder(
+            model_id=model_id,
             device=device,
         )
     raise ValueError(f"Unsupported self-refine backbone: {name}")

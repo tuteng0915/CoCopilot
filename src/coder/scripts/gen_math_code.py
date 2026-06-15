@@ -12,6 +12,8 @@ from typing import Any, Dict
 
 from tqdm import tqdm
 
+from datasets import load_dataset
+
 from coder.scripts.gen_math import (
     build_model,
     load_gsm8k,
@@ -82,7 +84,7 @@ def load_aime2025() -> list[Dict[str, Any]]:
     Dataset fields vary; we try common field names for problem and answer.
     All AIME answers are integers in [0, 999].
     """
-    ds = load_dataset("MathArena/aime_2025", split="test")
+    ds = load_dataset("MathArena/aime_2025", split="train")
     items = []
     for i, row in enumerate(ds):
         question = row.get("problem") or row.get("question") or ""

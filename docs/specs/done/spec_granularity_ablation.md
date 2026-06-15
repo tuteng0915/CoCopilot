@@ -18,28 +18,34 @@ Rewriter（Dream-Coder 7B），只改 `--mask_granularity`。
 
 ---
 
-## 当前进度（2026-04-22）
+## 当前进度（2026-06-04）
 
 已完成并评测：
 
 - `span + HumanEval`
   - raw: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span.jsonl`
+  - sanitized: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span-sanitized.jsonl`
+  - eval: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span-sanitized_eval_results.json`
   - summary: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span_summary.json`
   - 结果：HE+ plus = `65.2%`, HE+ base = `70.7%`
 - `span + MBPP`
   - raw: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span.jsonl`
+  - sanitized: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span-sanitized.jsonl`
+  - eval: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span-sanitized_eval_results.json`
   - summary: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span_summary.json`
   - 结果：MBPP+ plus = `69.0%`, MBPP+ base = `80.2%`
 - `line + HumanEval`
   - raw: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line.jsonl`
+  - sanitized: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line-sanitized.jsonl`
+  - eval: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line-sanitized_eval_results.json`
   - summary: `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line_summary.json`
   - 结果：HE+ plus = `45.7%`, HE+ base = `51.2%`
-
-尚未完成：
-
 - `line + MBPP`
-  - 还未生成：`outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line.jsonl` 当前不存在
-  - 原因：最近几次执行时没有空闲 GPU
+  - raw: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line.jsonl`
+  - sanitized: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line-sanitized.jsonl`
+  - eval: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line-sanitized_eval_results.json`
+  - summary: `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line_summary.json`
+  - 结果：MBPP+ plus = `68.0%`, MBPP+ base = `78.0%`
 
 注意：本 spec 里的 `postprocess_evalplus` / `eval_evalplus` CLI 已在代码中更新。
 下面的命令块已经按当前脚本接口修正为 `--dataset --samples` / `--output_file`。
@@ -143,7 +149,7 @@ print(f'records: {len(lines)}  (expected 164)')
 
 ### 2d. Line Granularity — MBPP
 
-> 状态：待执行。这是当前唯一剩余的生成任务。
+> 状态：已完成。原始完整结果路径：`outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line.jsonl`（378 行）。
 
 ```bash
 python -m coder.scripts.gen_remask \
@@ -264,29 +270,150 @@ print(f'line         | {he_line[0]:>8}  {he_line[1]:>8}  | {mb_line[0]:>10}  {mb
 
 ---
 
+## Phase 3：Cross ablation — span/line granularity + AR rewriter（已完成，2026-06-09）
+
+**动机**：span/line + dLLM-rewrite 结果下降，原因有两种可能：
+1. 粒度本身不好（mask 区域太大，包含太多正确 token）
+2. dLLM 重写大段时效果差（AR 重写大段可能更稳定）
+
+通过对比 span/line + AR-rewrite vs span/line + dLLM-rewrite，可以区分这两种原因。
+已有 `dLLM-locate + AR-rewrite`（token 粒度）= **68.9%**（HumanEval）/ **67.7%**（MBPP），可直接对比。
+
+本次 Phase 3 使用 `gen_locate_ar_rewrite --mask_source` 复用已有 token-level Locate-AR-Rewrite 的 `masked_draft` 决策，再扩展到 span/line 后交给 DeepSeek-Coder AR rewriter。原因：当前环境里重新用 Dream scorer 直接打分会出现 confidence scale drift，导致几乎全量 token 被 mask；复用既有 token baseline 的 mask 决策能保证本组 cross-ablation 与 token AR baseline 可比。
+
+### 命令
+
+```bash
+# span + AR-rewrite — HumanEval
+CUDA_VISIBLE_DEVICES=<GPU> PYTHONPATH=src python -m coder.scripts.gen_locate_ar_rewrite \
+  --ar_model deepseek \
+  --ar_device cuda:0 \
+  --locator_device cuda:0 \
+  --input outputs/base_tuteng/deepseek_humaneval.jsonl \
+  --out outputs/ablation_granularity/deepseek_ar_rewrite_humaneval_t0.9_gran_span.jsonl \
+  --mask_source outputs/base_tuteng/deepseek_humaneval_locate_ar_rewrite_t0.9.jsonl \
+  --confidence_threshold 0.9 \
+  --mask_granularity span \
+  --span_merge_gap 2 \
+  --seed 3407 \
+  --resume
+
+# span + AR-rewrite — MBPP
+CUDA_VISIBLE_DEVICES=<GPU> PYTHONPATH=src python -m coder.scripts.gen_locate_ar_rewrite \
+  --ar_model deepseek \
+  --ar_device cuda:0 \
+  --locator_device cuda:0 \
+  --input outputs/base_tuteng/deepseek_mbpp.jsonl \
+  --out outputs/ablation_granularity/deepseek_ar_rewrite_mbpp_t0.9_gran_span.jsonl \
+  --mask_source outputs/base_tuteng/deepseek_mbpp_locate_ar_rewrite_t0.9.jsonl \
+  --confidence_threshold 0.9 \
+  --mask_granularity span \
+  --span_merge_gap 2 \
+  --seed 3407 \
+  --resume
+
+# line + AR-rewrite — HumanEval
+CUDA_VISIBLE_DEVICES=<GPU> PYTHONPATH=src python -m coder.scripts.gen_locate_ar_rewrite \
+  --ar_model deepseek \
+  --ar_device cuda:0 \
+  --locator_device cuda:0 \
+  --input outputs/base_tuteng/deepseek_humaneval.jsonl \
+  --out outputs/ablation_granularity/deepseek_ar_rewrite_humaneval_t0.9_gran_line.jsonl \
+  --mask_source outputs/base_tuteng/deepseek_humaneval_locate_ar_rewrite_t0.9.jsonl \
+  --confidence_threshold 0.9 \
+  --mask_granularity line \
+  --seed 3407 \
+  --resume
+
+# line + AR-rewrite — MBPP
+CUDA_VISIBLE_DEVICES=<GPU> PYTHONPATH=src python -m coder.scripts.gen_locate_ar_rewrite \
+  --ar_model deepseek \
+  --ar_device cuda:0 \
+  --locator_device cuda:0 \
+  --input outputs/base_tuteng/deepseek_mbpp.jsonl \
+  --out outputs/ablation_granularity/deepseek_ar_rewrite_mbpp_t0.9_gran_line.jsonl \
+  --mask_source outputs/base_tuteng/deepseek_mbpp_locate_ar_rewrite_t0.9.jsonl \
+  --confidence_threshold 0.9 \
+  --mask_granularity line \
+  --seed 3407 \
+  --resume
+```
+
+Sanitize + 评测：
+
+```bash
+for GRAN in span line; do
+  for DATASET in humaneval mbpp; do
+    python -m coder.scripts.postprocess_evalplus \
+      --dataset $DATASET \
+      --samples outputs/ablation_granularity/deepseek_ar_rewrite_${DATASET}_t0.9_gran_${GRAN}.jsonl
+
+    python -m coder.scripts.eval_evalplus \
+      --dataset $DATASET \
+      --samples outputs/ablation_granularity/deepseek_ar_rewrite_${DATASET}_t0.9_gran_${GRAN}-sanitized.jsonl \
+      --backend local --parallel 16 \
+      --output_file outputs/ablation_granularity/deepseek_ar_rewrite_${DATASET}_t0.9_gran_${GRAN}-sanitized_eval_results.json \
+      --summary_out outputs/ablation_granularity/deepseek_ar_rewrite_${DATASET}_t0.9_gran_${GRAN}_summary.json \
+      --summary_model deepseek_ar_rewrite_${DATASET}_t0.9_gran_${GRAN}
+  done
+done
+```
+
+### 结果解读框架
+
+完整 2×3 矩阵：
+
+| Granularity | dLLM rewriter HE+ | AR rewriter HE+ | dLLM rewriter MBPP+ | AR rewriter MBPP+ |
+|-------------|------------------|----------------|--------------------|------------------|
+| token | 72.6% ✅ | 68.9% ✅ | 70.1% ✅ | 67.7% ✅ |
+| span (`merge_gap=2`) | 65.2% ✅ | 65.9% ✅ | 69.0% ✅ | 67.5% ✅ |
+| line | 45.7% ✅ | 64.6% ✅ | 68.0% ✅ | 67.7% ✅ |
+
+Phase 3 AR-rewrite summary：
+
+| Granularity | Dataset | Base | Plus | Summary |
+|-------------|---------|------|------|---------|
+| span | HumanEval | 75.0% | 65.9% | `outputs/ablation_granularity/deepseek_ar_rewrite_humaneval_t0.9_gran_span_summary.json` |
+| span | MBPP | 78.0% | 67.5% | `outputs/ablation_granularity/deepseek_ar_rewrite_mbpp_t0.9_gran_span_summary.json` |
+| line | HumanEval | 73.2% | 64.6% | `outputs/ablation_granularity/deepseek_ar_rewrite_humaneval_t0.9_gran_line_summary.json` |
+| line | MBPP | 77.2% | 67.7% | `outputs/ablation_granularity/deepseek_ar_rewrite_mbpp_t0.9_gran_line_summary.json` |
+
+| 结果模式 | 解读 |
+|---------|------|
+| AR-rewrite ≈ dLLM-rewrite 于 span/line | 问题在粒度本身，两种 rewriter 都无法弥补；token 仍是最优粒度 |
+| AR-rewrite > dLLM-rewrite 于 span/line（如 span+AR ≈ 70%） | dLLM 重写大段时效果差，AR 更擅长填充较长上下文；粒度选择依赖 rewriter 类型 |
+
+已填入 `docs/results.md` 的 `Mask Granularity Ablation` 表。
+
+---
+
 ## 完成判定
 
 - [x] span HumanEval 生成完毕（164 行）
 - [x] span MBPP 生成完毕（378 行）
 - [x] line HumanEval 生成完毕（164 行）
-- [ ] line MBPP 生成完毕（378 行）
-- [ ] 4 个产物均通过 postprocess + eval_evalplus
-- [ ] 结果填入 `docs/results.md` 的 Locator 消融 / 粒度消融表
+- [x] line MBPP 生成完毕（378 行）
+- [x] 4 个 dLLM-rewrite 产物均通过 postprocess + eval_evalplus
+- [x] 结果填入 `docs/results.md`（粒度消融表已添加，2026-06-09）
+- [x] span + AR-rewrite HumanEval
+- [x] span + AR-rewrite MBPP
+- [x] line + AR-rewrite HumanEval
+- [x] line + AR-rewrite MBPP
+- [x] AR-rewrite 结果更新至 `docs/results.md` 粒度消融表
 
-## 恢复执行顺序
+## 已有结果（dLLM rewriter）
 
-当有空闲 GPU 后，从这里继续：
-
-1. 跑 `2d. Line Granularity — MBPP`
-2. 跑 `line — MBPP` 的 postprocess + eval
-3. 执行上面的“结果读取”脚本，确认四行齐全
-4. 把结果补进 `docs/results.md` 的粒度消融表
+| Granularity | Dataset | Base | Plus | Summary |
+|-------------|---------|------|------|---------|
+| span | HumanEval | 70.7% | 65.2% | `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_span_summary.json` |
+| span | MBPP | 80.2% | 69.0% | `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_span_summary.json` |
+| line | HumanEval | 51.2% | 45.7% | `outputs/ablation_granularity/deepseek_dream_humaneval_t0.9_gran_line_summary.json` |
+| line | MBPP | 78.0% | 68.0% | `outputs/ablation_granularity/deepseek_dream_mbpp_t0.9_gran_line_summary.json` |
 
 ## 显存估算
 
-- Dream-Coder（7B, bf16）：约 14GB
-- 本实验 Locator = Rewriter（共用 Dream），无额外模型
-- 单卡 A100 40GB 充裕
+- Dream-Coder（7B, bf16）：约 14GB；DeepSeek-Coder（6.7B, bf16）：约 14GB
+- Phase 3 中 Locator=Dream + Rewriter=DeepSeek，需同时加载两个模型：约 28GB，需 A100 40GB 或双卡
 
 ## 参数说明
 

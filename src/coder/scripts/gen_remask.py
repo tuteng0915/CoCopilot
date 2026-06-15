@@ -280,6 +280,34 @@ def summarize_mask_spans(
     }
 
 
+def align_oracle_confidence_to_spans(
+    conf: np.ndarray,
+    src_spans: list[tuple[int, int]],
+    tgt_spans: list[tuple[int, int]],
+) -> np.ndarray:
+    """
+    Align oracle character confidence to refiner tokens.
+
+    Oracle masking should cover every refiner token that overlaps any
+    zero-confidence oracle character; averaging would miss one-character edits
+    inside longer tokens.
+    """
+    result = np.ones(len(tgt_spans), dtype=np.float32)
+    zero_spans = [
+        (start, end)
+        for idx, (start, end) in enumerate(src_spans)
+        if idx < len(conf) and float(conf[idx]) < 0.5 and end > start
+    ]
+    if not zero_spans:
+        return result
+    for tgt_idx, (tgt_start, tgt_end) in enumerate(tgt_spans):
+        if tgt_end <= tgt_start:
+            continue
+        if any(src_end > tgt_start and src_start < tgt_end for src_start, src_end in zero_spans):
+            result[tgt_idx] = 0.0
+    return result
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Refine AR drafts with a diffusion refiner via confidence-based remasking."
@@ -299,7 +327,7 @@ def main() -> None:
     # Locator — which model decides which tokens to remask
     ap.add_argument(
         "--locator",
-        choices=["dream", "ar", "bert"],
+        choices=["dream", "ar", "bert", "random", "oracle"],
         default="dream",
         help=(
             "Model used to score draft tokens and decide what to remask.\n"
@@ -308,7 +336,9 @@ def main() -> None:
             "  ar:              an AR model's teacher-forced log-probabilities\n"
             "                   (causal, left-context only).\n"
             "  bert:            CodeBERT single-pass MLM confidence\n"
-            "                   (bidirectional, lightweight)."
+            "                   (bidirectional, lightweight).\n"
+            "  random:          uniformly random token confidence (null baseline).\n"
+            "  oracle:          precomputed gold diff spans from --locator_model_id."
         ),
     )
     ap.add_argument(
@@ -481,6 +511,7 @@ def main() -> None:
         print(f"[locator] using external locator: {args.locator} ({args.locator_model_id})")
     else:
         print(f"[locator] using {refiner_name} refiner as locator")
+    is_task_aware_locator = locator is not None and hasattr(locator, "score_for_task")
 
     t_total0 = time.perf_counter()
     timing_remask_s: list[float] = []
@@ -522,13 +553,21 @@ def main() -> None:
                 # Compute external confidence when a non-dream locator is used.
                 ext_conf: torch.Tensor | None = None
                 if locator is not None and draft:
-                    loc_conf, loc_spans = locator.score(prompt_text, draft)
+                    if is_task_aware_locator:
+                        loc_conf, loc_spans = locator.score_for_task(rec_id, draft)
+                    else:
+                        loc_conf, loc_spans = locator.score(prompt_text, draft)
                     if len(loc_conf) > 0:
                         # Align locator scores to the refiner's token space.
                         refiner_spans = get_token_char_spans(model.tok, draft)
-                        aligned = align_confidence_to_spans(
-                            loc_conf, loc_spans, refiner_spans,
-                        )
+                        if is_task_aware_locator:
+                            aligned = align_oracle_confidence_to_spans(
+                                loc_conf, loc_spans, refiner_spans,
+                            )
+                        else:
+                            aligned = align_confidence_to_spans(
+                                loc_conf, loc_spans, refiner_spans,
+                            )
                         ext_conf = torch.tensor(
                             aligned, dtype=torch.float32, device=args.device,
                         )
@@ -608,6 +647,8 @@ def main() -> None:
                     solution = refined
                 elif benchmark == "bigcodebench":
                     solution = build_prompt_scaffold_solution(prompt_text, refined)
+                elif benchmark == "spider":
+                    solution = refined
                 else:
                     solution = build_evalplus_solution(prompt_text, refined)
             t_pack1 = time.perf_counter()
@@ -673,6 +714,11 @@ def main() -> None:
                     for key in ("split", "subset", "revision", "source_prompt"):
                         if key in rec:
                             out_rec[key] = rec[key]
+                if benchmark == "spider":
+                    for key in ("db_id", "question", "gold_sql"):
+                        if key in rec:
+                            out_rec[key] = rec[key]
+                    out_rec["pred_sql"] = refined
 
             fout.write(json.dumps(out_rec, ensure_ascii=False) + "\n")
             fout.flush()

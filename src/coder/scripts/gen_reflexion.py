@@ -26,6 +26,7 @@ from tqdm import tqdm
 
 from coder.models import (
     ApiCoder,
+    CodeLlamaCoder,
     DeepSeekCoder,
     QwenCoder,
     Qwen35Coder,
@@ -83,6 +84,8 @@ def build_model(name: str, device: str, model_id: Optional[str]) -> CoderModel:
         return StarCoder2Coder(model_id=model_id or "bigcode/starcoder2-7b", device=device)
     if name in ["mistral", "mistral_coder"]:
         return MistralCoder(model_id=model_id or "mistralai/Mistral-7B-Instruct-v0.3", device=device)
+    if name in ["codellama", "codellama_coder"]:
+        return CodeLlamaCoder(model_id=model_id or "codellama/CodeLlama-7b-Instruct-hf", device=device)
     if name in ["llama31", "llama31_coder", "llama3.1"]:
         return Llama31Coder(model_id=model_id or "meta-llama/Llama-3.1-8B-Instruct", device=device)
     if name in ["diffullama", "diffullama_coder", "dflm"]:

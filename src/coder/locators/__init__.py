@@ -8,11 +8,15 @@ from coder.locators.base import (
 )
 from coder.locators.ar_locator import ARLocator
 from coder.locators.bert_locator import BERTLocator
+from coder.locators.oracle_locator import OracleLocator
+from coder.locators.random_locator import RandomLocator
 
 __all__ = [
     "TokenLocator",
     "ARLocator",
     "BERTLocator",
+    "OracleLocator",
+    "RandomLocator",
     "get_token_char_spans",
     "align_confidence_to_spans",
     "apply_masking_policy",
@@ -36,7 +40,7 @@ def build_locator(
     LLaDACoder) acts as its own locator via its built-in score_tokens().
 
     Args:
-        name:     one of 'dream', 'ar', 'bert'.
+        name:     one of 'dream', 'ar', 'bert', 'random', 'oracle'.
         model_id: HuggingFace model ID; falls back to a sensible default when
                   None.
         device:   torch device string.
@@ -51,4 +55,13 @@ def build_locator(
         mid = model_id or _DEFAULT_BERT_MODEL
         print(f"[locator] loading BERT locator: {mid}")
         return BERTLocator(model_id=mid, device=device)
-    raise ValueError(f"Unknown locator: {name!r}. Choose from: dream, ar, bert")
+    if name == "random":
+        seed = int(model_id) if model_id and model_id.isdigit() else 42
+        print(f"[locator] using RandomLocator (seed={seed})")
+        return RandomLocator(seed=seed)
+    if name == "oracle":
+        if not model_id:
+            raise ValueError("--locator oracle requires --locator_model_id <path_to_oracle_jsonl>")
+        print(f"[locator] using OracleLocator: {model_id}")
+        return OracleLocator(oracle_jsonl=model_id)
+    raise ValueError(f"Unknown locator: {name!r}. Choose from: dream, ar, bert, random, oracle")

@@ -36,6 +36,11 @@ class CodeLlamaCoder(CoderModel):
             tokenize=False,
         )
         inputs = self.tok(prompt, return_tensors="pt").to(self.device)
+        inputs = {
+            k: v
+            for k, v in inputs.items()
+            if k in ("input_ids", "attention_mask", "token_type_ids")
+        }
 
         if req.seed is not None:
             torch.manual_seed(req.seed)
