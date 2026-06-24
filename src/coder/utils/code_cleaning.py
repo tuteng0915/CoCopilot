@@ -129,9 +129,18 @@ def build_evalplus_solution(prompt_text: str, completion: str) -> str:
         else:
             body = gen.rstrip()
 
-        imports = extract_prompt_imports(prompt)
-        if imports and imports not in body:
-            body = (imports + "\n\n" + body).rstrip()
+        # Collect imports from prompt AND from the completion itself.
+        # extract_single_function discards top-level imports; re-inject them.
+        prompt_imports = extract_prompt_imports(prompt)
+        completion_imports = extract_prompt_imports(gen)
+        import_lines = []
+        seen = set(body.splitlines())
+        for line in (prompt_imports + "\n" + completion_imports).splitlines():
+            if line and line not in seen:
+                import_lines.append(line)
+                seen.add(line)
+        if import_lines:
+            body = ("\n".join(import_lines) + "\n\n" + body).rstrip()
         return body.rstrip()
 
     return (prompt + "\n" + indent_as_body(gen.lstrip())).rstrip()

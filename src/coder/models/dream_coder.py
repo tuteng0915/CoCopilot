@@ -10,7 +10,7 @@ from transformers.generation.configuration_utils import GenerationConfig
 from transformers import AutoModel, AutoTokenizer
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
-from coder.locators.base import apply_masking_policy
+from coder.locators.base import apply_masking_policy, import_line_token_mask
 from coder.models.base import CoderModel
 from coder.utils.code_cleaning import clean_model_completion
 from coder.utils.schema import ModelRequest
@@ -120,6 +120,23 @@ class DreamCoder(CoderModel):
     def name(self) -> str:
         return f"dream_coder::{self.model_id}"
 
+    def _strip_mask_tokens(self, gen_ids_list: list) -> list:
+        """Truncate at the first remaining mask token (e.g. <|dlm_pad|> in DiffuCoder).
+
+        Some models (DiffuCoder) leave positions as mask_token_id when they predict EOS
+        before filling all generated positions. Truncating at the first such token
+        recovers the valid prefix rather than letting the literal token string pollute
+        the decoded text.
+        """
+        mask_id = getattr(self.model.config, "mask_token_id", None)
+        if mask_id is None:
+            return gen_ids_list
+        try:
+            first = gen_ids_list.index(mask_id)
+            return gen_ids_list[:first]
+        except ValueError:
+            return gen_ids_list
+
     def _wrap_forward_logits_compat(self) -> None:
         original_forward = self.model.forward
 
@@ -182,6 +199,8 @@ class DreamCoder(CoderModel):
         mask_granularity: str = "token",
         span_merge_gap: int = 0,
         external_confidence: torch.Tensor | None = None,
+        protect_imports: bool = False,
+        protect_last_n_tokens: int = 0,
     ) -> str:
         """
         Remask low-confidence tokens in `draft` and regenerate via diffusion.
@@ -199,6 +218,8 @@ class DreamCoder(CoderModel):
                 shape [M] in the refiner's token space.  When provided,
                 score_tokens() is skipped and this tensor is used directly.
                 Masking policy and granularity are still applied here.
+            protect_last_n_tokens: Force confidence=1.0 for the last N tokens
+                of the completion, preventing them from being masked.
         """
         mask_token_id = self.model.config.mask_token_id
 
@@ -225,6 +246,16 @@ class DreamCoder(CoderModel):
             confidence = external_confidence.to(self.device)
         else:
             confidence = self.score_tokens(prompt_ids, comp_ids)  # [M]
+
+        if protect_imports:
+            imp_mask = import_line_token_mask(draft, comp_ids, self.tok)
+            confidence = confidence.clone()
+            confidence[imp_mask] = 1.0
+
+        if protect_last_n_tokens > 0 and M > 0:
+            n = min(int(protect_last_n_tokens), M)
+            confidence = confidence.clone()
+            confidence[-n:] = 1.0
 
         mask_pos = apply_masking_policy(
             confidence, confidence_threshold, mask_ratio,
@@ -280,7 +311,7 @@ class DreamCoder(CoderModel):
 
         seq = out.sequences[0]
         gen_ids = seq[L_p:]
-        raw = self.tok.decode(gen_ids.tolist(), skip_special_tokens=False)
+        raw = self.tok.decode(self._strip_mask_tokens(gen_ids.tolist()), skip_special_tokens=False)
         eos = self.tok.eos_token
         if eos:
             raw = raw.split(eos)[0]
@@ -334,7 +365,7 @@ class DreamCoder(CoderModel):
         # Decode only the generated suffix (same spirit as official quick start)
         seq = out.sequences[0]
         gen_ids = seq[len(input_ids[0]) :]
-        gen = self.tok.decode(gen_ids.tolist(), skip_special_tokens=False)
+        gen = self.tok.decode(self._strip_mask_tokens(gen_ids.tolist()), skip_special_tokens=False)
 
         # Trim eos if present
         eos = self.tok.eos_token

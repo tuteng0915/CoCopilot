@@ -3,7 +3,20 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from pathlib import Path
+
+# Resolve evalplus CLI tools relative to the current Python interpreter so they
+# are found even when the conda env's bin directory isn't in PATH.
+_EVALPLUS_BIN = Path(sys.executable).parent
+
+
+def _evalplus_cmd(name: str) -> str:
+    """Return the absolute path to an evalplus CLI tool."""
+    candidate = _EVALPLUS_BIN / name
+    if candidate.exists():
+        return str(candidate)
+    return name  # fall back to PATH lookup
 
 
 def run(cmd: list[str]):
@@ -27,16 +40,16 @@ def main():
 
     # syncheck usually needs dataset
     if not args.skip_syncheck:
-        run(["evalplus.syncheck", "--samples", args.samples, "--dataset", args.dataset])
+        run([_evalplus_cmd("evalplus.syncheck"), "--samples", args.samples, "--dataset", args.dataset])
 
     # sanitize in your evalplus version does NOT take --dataset
-    run(["evalplus.sanitize", "--samples", args.samples])
+    run([_evalplus_cmd("evalplus.sanitize"), "--samples", args.samples])
 
     sanitized = guess_sanitized_path(args.samples)
     print("[info] sanitized samples:", sanitized)
 
     if not args.skip_syncheck:
-        run(["evalplus.syncheck", "--samples", sanitized, "--dataset", args.dataset])
+        run([_evalplus_cmd("evalplus.syncheck"), "--samples", sanitized, "--dataset", args.dataset])
 
 
 if __name__ == "__main__":

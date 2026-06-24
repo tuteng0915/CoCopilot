@@ -17,6 +17,7 @@ from coder.utils.code_cleaning import (
 from coder.models import (
     CoderModel,
     DreamCoder,
+    DiffuCoder,
     DeepSeekCoder,
     QwenCoder,
     Qwen35Coder,
@@ -36,6 +37,11 @@ def build_model(name: str, device: str, model_id: str | None) -> CoderModel:
     if name == "dream":
         return DreamCoder(
             model_id=model_id or "Dream-org/Dream-Coder-v0-Instruct-7B",
+            device=device,
+        )
+    if name == "diffucoder":
+        return DiffuCoder(
+            model_id=model_id or "apple/DiffuCoder-7B-Instruct",
             device=device,
         )
     if name == "deepseek":
@@ -145,6 +151,7 @@ def main():
         "--model",
         choices=[
             "dream",
+            "diffucoder",
             "deepseek",
             "qwen",
             "qwen35",

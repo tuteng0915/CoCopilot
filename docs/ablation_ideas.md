@@ -1,180 +1,85 @@
 # Ablation Experiments and Mini-Study Ideas (CoCoder)
 
-This document records "easy to run, conclusive" ablation / model study ideas to prevent them from remaining only in verbal discussion.
+已完成并入论文的实验：§A（粒度消融）、§B（Locator 模型替换）、§C（启发式 reranking）、§D（Reflexion baseline）、E1（多轮精炼）、E2（解耦组合全覆盖）。以下仅保留**未完成**条目。
 
 ---
 
-## Framework: Three-Role Decomposition
-
-CoCoder's core pipeline consists of three independently replaceable roles:
+## 框架速查
 
 ```
-AR drafter  ──►  Locator  ──►  dLLM rewriter
- generates draft   scores draft, marks low-confidence tokens   rewrites masked positions (diffusion)
+AR drafter ──► Locator ──► dLLM rewriter
 ```
 
-- **Drafter**: AR model (DeepSeek-Coder, Qwen2.5-Coder, etc.) generates the initial code draft
-- **Locator**: scores each token in the draft for confidence; low-scoring tokens are masked
-- **Rewriter**: dLLM (Dream-Coder, LLaDA) diffusion-regenerates masked positions
-
-**Default configuration**: Locator and Rewriter share the same dLLM. The dLLM first performs a single forward pass on the draft to score it (acting as Locator), then performs diffusion rewriting on low-confidence tokens (acting as Rewriter). These two sub-steps are already decoupled in the code (`coder/locators/`) and can be freely replaced.
-
-Overview of ablation dimensions per role:
-
-| Role | Ablation Dimension | Core Question | Section |
-|------|-------------------|---------------|---------|
-| **Locator** | Granularity: token / span / line | Fragmented mask vs. structured mask | §A |
-| **Locator** | Model: dLLM / AR / BERT | Is bidirectional perception necessary? Is a lightweight model sufficient? | §B |
-| **Rewriter** | Model: Dream-Coder / LLaDA | Effect of diffusion model choice | Table 3 (done) |
-| **Drafter** | Model: DeepSeek / Qwen / Llama / StarCoder2 | Effect of AR draft quality | Table 3 (done) |
-
 ---
 
-## A. Locator Granularity (Implemented)
+## 剩余待完成实验
 
-**Core question**: After the Locator scores the draft, how are the mask "boundaries" determined?
+### A. `step` 粒度（代码有，结果未跑）
 
-Script: `python -m coder.scripts.gen_remask`, parameters: `--mask_granularity {token,span,line}`
+Locator 粒度的第四档：找最低置信 step，**截断续写**（rewriter 接管后续生成），而非 fill-in-the-blank。
 
-| Granularity | Behavior | Use Case |
-|-------------|----------|---------|
-| `token` | Mask only low-confidence tokens (default, finest granularity) | Point errors (single variable name, operator) |
-| `span` | Merge adjacent low-confidence tokens into contiguous spans (`--span_merge_gap K`) | Reduce fragmentation; suitable for local logic errors |
-| `line` | If any token on a line is low-confidence, mask the entire line | Closer to "structured editing"; suitable for indentation/block-level errors |
-| `step` | Find the least-confident step, **truncate** from that step, let Rewriter take over continuation | CoT/math reasoning: ensures causal consistency of subsequent steps; Rewriter can be AR or dLLM |
-
-The `step` granularity is at the same abstraction level as the other three (all are "how to determine mask boundaries"), but semantically shifts from "fill holes" to "continue writing" — especially suited for chain-of-thought scenarios, since each CoT step depends on the previous result and parallel denoising cannot guarantee numerical consistency between steps.
-
-Recommended sweep: `{token, span, line}` × `span_merge_gap ∈ {0, 1, 2, 4}`, comparing under aligned masked token ratios (otherwise unfair). `step` granularity evaluated separately (truncation position selection strategy can be ablated independently).
-
-### A2. dLLM-locate + AR-rewrite (Implemented)
-
-Script: `python -m coder.scripts.gen_locate_ar_rewrite`
-
-Use dLLM as Locator, use AR model as Rewriter (constrained via prompt to "only modify masked positions").
-Note: AR rewriter is not a hard-constraint edit; it can serve as one baseline after Locator decoupling (corresponding to §C2 Pending).
-
----
-
-## B. Locator Model Replacement (Implemented)
-
-**Core question**: When the Locator is replaced with models of different architectures/scales, how does pass@1 change?
-
-This experiment directly tests dLLM's contribution in the localization stage: **Is bidirectional context perception necessary? Is it worth loading a 7B dLLM for scoring?**
-
-### Three Locators
-
-| Name | Params | Perception | Extra Inference Cost | How to Use |
-|------|--------|------------|---------------------|-----------|
-| `dream` (default) | 7B | **Bidirectional** (diffusion LM full-sequence forward) | 0 (shared with Rewriter) | default behavior |
-| `ar` | 7B | **Unidirectional** (AR teacher-forced logprob) | 1 AR forward pass | `--locator ar` |
-| `bert` | 125M | **Bidirectional** (CodeBERT MLM head, single forward) | Minimal | `--locator bert` |
-
-Example runs:
+与 token/span/line 在同一个消融维度，但语义上从"填坑"变为"续写"，更适合 CoT 场景。
 
 ```bash
-# AR locator (test "is bidirectional perception necessary?")
-python -m coder.scripts.gen_remask \
-  --input  outputs/base_tuteng/deepseek_humaneval.jsonl \
-  --out    outputs/ablation_locator/deepseek_dream_humaneval_t0.9_loc_ar.jsonl \
-  --locator ar --mask_ratio 0.9
-
-# BERT locator (test "is 125M sufficient?")
-python -m coder.scripts.gen_remask \
-  --input  outputs/base_tuteng/deepseek_humaneval.jsonl \
-  --out    outputs/ablation_locator/deepseek_dream_humaneval_t0.9_loc_bert.jsonl \
-  --locator bert --mask_ratio 0.9
+gen_remask --mask_granularity step
 ```
 
-Full experiment spec: `docs/specs/done/spec_locator_ablation.md`.
-
-### Auxiliary Analysis: Fault Detection Ratio
-
-Without running full pass@1, you can quickly evaluate Locator fault detection capability from existing artifacts:
-
-```bash
-python -m coder.analysis.locator_scoring \
-  --remask_dir outputs/base_tuteng --dataset humaneval --device cuda
-```
-
-Outputs `P(fault) / P(non-fault)` ratio — higher ratio means the Locator better distinguishes truly erroneous tokens from correct ones.
-
-### Expected Conclusions and Paper Significance
-
-- **If AR < dLLM**: bidirectional context perception is effective; dLLM's Locator role has independent contribution
-- **If BERT ≈ dLLM**: 125M lightweight bidirectional model is sufficient; no need to load an extra 7B model
-- **If AR ≈ dLLM**: error localization mainly depends on local context; bidirectional perception is not critical
+优先级：低（代码任务意义有限，主要用于 CoT/math 扩展研究）。
 
 ---
 
-## C. Reranking with AR Logprobs (Basic Version Implemented)
+### B. Reranking 进阶评分模式（代码有，未入论文）
 
-**Background**: This section covers Best-of-N candidate reranking (`gen_rerank.py`), independent of the §B remask locator; it is a separate pipeline.
-
-Script: `python -m coder.scripts.gen_rerank`
-
-`--score_mode` options:
-- `self_judge` (default): AR model does listwise selection, picks one from N candidates
-- `logprob`: teacher-forced `sum/avg log p(completion | prompt)`, takes best by score
-- `heuristic`: heuristic scoring (legacy fallback)
+当前论文中 AR+Reranking 使用 `heuristic` 模式。以下两种模式已实现但未跑：
 
 ```bash
-python -m coder.scripts.gen_rerank \
-  --model deepseek-ai/deepseek-coder-6.7b-instruct \
-  --dataset humaneval --num_samples 8 \
-  --score_mode logprob --logprob_norm avg \
-  --out outputs/ablation/deepseek_rerank_logprob_k8_humaneval.jsonl
+# logprob 模式：sum/avg log p(completion|prompt) 选最优
+gen_rerank --score_mode logprob --logprob_norm avg
+
+# self_judge 模式：AR 模型 listwise 自判断
+gen_rerank --score_mode self_judge
 ```
+
+优先级：中低（论文已有 heuristic reranking 作为 baseline，增量价值有限；但 logprob 模式是更"公平"的 reranking baseline）。
 
 ---
 
-## D. Reflexion Baseline (Simplified Version Implemented)
+### C. Oracle Locator 性能上界（可选）
 
-Script: `python -m coder.scripts.gen_reflexion`
+Mask 掉 AR draft 与 reference solution 实际有差异的 token，然后用 dLLM rewrite。
 
-Pipeline (default 1 round): problem + draft → `reflection` (verbal reflection) → `revised` (revised code).
+**目的**：量化 localization 质量瓶颈——如果 oracle locator 也只有 +X pp，说明 rewrite 才是瓶颈；如果有大幅提升，说明 localize 准确率是主要上升空间。
 
-Options:
-- `--rounds T`: multi-round reflexion
-- `--feedback_key KEY` / `--feedback_file FILE`: inject real eval failure feedback (EvalPlus supported)
-
-Companion feedback extraction:
-```bash
-python -m coder.analysis.evalplus_feedback \
-  --eval_results <..._eval_results.json> --out_feedback <...evalplus_feedback.jsonl>
-```
+需要 token-level diff 对齐脚本（未实现）。优先级：中（narrative_reframe §4.1.B）。
 
 ---
 
-## E. Pending: Follow-up Work (Not Yet Implemented)
+### D. Calibration Plot（数据有，图未画）
 
-### E1. Multi-Round Local Patching (T Rounds)
+将 dLLM 置信度按分位数分桶，计算每个桶内实际 fault token 的比例。
 
-Locate → rewrite → re-locate → re-rewrite; observe gains and degradation at T=1/2/3.
-Corresponds to §B three-role framework: each round can use a different Locator.
+论文已有 ROC/AUC 曲线（app:calibration），但 calibration plot 可视化 **置信度校准性**，与 ROC 互补。从现有 `locator_scoring.py` 输出直接计算，无需新实验。优先级：中高（narrative_reframe §4.2.A）。
 
-### E2. More Combinations of Decoupled Locator
+---
 
-The three-role framework theoretically allows arbitrary combinations:
+### E. (τ, temperature, top-p) 联合敏感性（未跑）
 
-| Drafter | Locator | Rewriter |
-|---------|---------|---------|
-| AR | dLLM (default) | dLLM |
-| AR | AR (§B ablation) | dLLM |
-| AR | BERT (§B ablation) | dLLM |
-| AR | dLLM | AR (A2, implemented) |
-| AR | Random (pure ablation baseline) | dLLM |
+`gen_remask --temperature --top_p` 网格搜索，量化三个解码参数的交互效果。
 
-Random locator (randomly mask the same proportion of tokens) is the cleanest ablation baseline: if random ≈ dLLM, it means localization itself has no value.
+优先级：低（τ 单维扫描已在论文，联合实验信息增量小）。
 
-### E3. (τ, temperature, top-p) Joint Sensitivity
+---
 
-`gen_remask --temperature --top_p` sweep; design in `ablation_ideas.md` §A.
+### F. 编辑量 vs. 成功率分析图（部分完成）
 
-### E4. "Edit Magnitude vs. Success Rate" Analysis Plot
+对每个问题统计 mask 数、diff 距离、pass/fail，找最优编辑量区间（与 Locator 类型交叉分析）。
 
-Count mask count, diff distance, and pass/fail per problem; find the optimal edit magnitude range (cross-analyzed with Locator type).
+当前论文有失败模式分解（A/B/C1/C2/D，app:failure），但缺少连续变量（编辑量）vs. 成功率的分布图。
 
-### E5. Prompt / Output Format Robustness
+优先级：中（对"surgical fix"叙事有补充）。
 
-Code fence sensitivity, system prompt strength, max_new_tokens truncation sensitivity.
+---
+
+### G. Prompt / 输出格式鲁棒性（未实现）
+
+Code fence 敏感性、system prompt 强度、max\_new\_tokens 截断敏感性。优先级：低。

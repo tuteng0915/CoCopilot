@@ -5,7 +5,7 @@ import re
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-from coder.locators.base import apply_masking_policy
+from coder.locators.base import apply_masking_policy, import_line_token_mask
 from coder.models.base import CoderModel
 from coder.utils.schema import ModelRequest
 
@@ -282,6 +282,8 @@ class LLaDACoder(CoderModel):
         mask_granularity: str = "token",
         span_merge_gap: int = 0,
         external_confidence: torch.Tensor | None = None,
+        protect_imports: bool = False,
+        protect_last_n_tokens: int = 0,
     ) -> str:
         """
         Remask low-confidence tokens in `draft` and regenerate via LLaDA diffusion.
@@ -290,6 +292,10 @@ class LLaDACoder(CoderModel):
             external_confidence: Optional pre-computed confidence tensor of
                 shape [M] in the refiner's token space.  When provided,
                 score_tokens() is skipped.  Masking policy is still applied.
+            protect_last_n_tokens: Force confidence=1.0 for the last N tokens
+                of the completion.  LLaDA systematically underestimates confidence
+                for final closing delimiters (e.g. `)`/`]`), causing trailing
+                truncation.  Setting this to 2-3 prevents masking those tokens.
         """
         messages = [{"role": "user", "content": req.prompt}]
         prompt_text = self.tok.apply_chat_template(
@@ -316,6 +322,16 @@ class LLaDACoder(CoderModel):
             confidence = external_confidence.to(self.device)
         else:
             confidence = self.score_tokens(prompt_ids, comp_ids, attention_mask)
+
+        if protect_imports:
+            imp_mask = import_line_token_mask(draft, comp_ids, self.tok)
+            confidence = confidence.clone()
+            confidence[imp_mask] = 1.0
+
+        if protect_last_n_tokens > 0 and orig_len > 0:
+            n = min(int(protect_last_n_tokens), orig_len)
+            confidence = confidence.clone()
+            confidence[-n:] = 1.0
 
         mask_pos = apply_masking_policy(
             confidence, confidence_threshold, mask_ratio,

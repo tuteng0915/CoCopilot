@@ -44,7 +44,7 @@ from coder.locators import (
     build_locator,
     get_token_char_spans,
 )
-from coder.models import DreamCoder, LLaDACoder, DreamGeneral
+from coder.models import DreamCoder, LLaDACoder, DreamGeneral, DiffuCoder, SeedDiffCoder
 from coder.utils.code_cleaning import (
     build_evalplus_solution,
     build_prompt_scaffold_solution,
@@ -89,6 +89,10 @@ def infer_refiner_name(model_id: str) -> str:
     mid = (model_id or "").lower()
     if "llada" in mid:
         return "llada"
+    if "diffucoder" in mid or "apple" in mid:
+        return "diffucoder"
+    if "stable-diffcoder" in mid or "bytedance" in mid:
+        return "seed-diffcoder"
     return "dream"
 
 
@@ -96,6 +100,8 @@ _DEFAULT_REFINER_MODELS = {
     "dream": "Dream-org/Dream-Coder-v0-Instruct-7B",
     "dream_general": "Dream-org/Dream-v0-Instruct-7B",
     "llada": "GSAI-ML/LLaDA-8B-Instruct",
+    "diffucoder": "apple/DiffuCoder-7B-Instruct",
+    "seed-diffcoder": "ByteDance-Seed/Stable-DiffCoder-8B-Instruct",
 }
 
 
@@ -107,6 +113,10 @@ def build_refiner(name: str, model_id: str | None, device: str):
         return DreamGeneral(model_id=resolved_id, device=device)
     if name == "llada":
         return LLaDACoder(model_id=resolved_id, device=device)
+    if name == "diffucoder":
+        return DiffuCoder(model_id=resolved_id, device=device)
+    if name == "seed-diffcoder":
+        return SeedDiffCoder(model_id=resolved_id, device=device)
     raise ValueError(f"Unsupported refiner: {name}")
 
 
@@ -139,6 +149,7 @@ def compute_refiner_mask_plan(
     mask_granularity: str,
     span_merge_gap: int,
     external_confidence: torch.Tensor | None,
+    protect_last_n_tokens: int = 0,
 ) -> tuple[torch.Tensor | None, torch.BoolTensor | None, dict]:
     """Score the draft once and compute the planned remask positions."""
     comp_enc = model.tok(draft, return_tensors="pt", add_special_tokens=False)
@@ -156,7 +167,7 @@ def compute_refiner_mask_plan(
 
     if external_confidence is not None:
         confidence = external_confidence.to(model.device)
-    elif refiner_name in ("dream", "dream_general"):
+    elif refiner_name in ("dream", "dream_general", "diffucoder"):
         messages = [{"role": "user", "content": req.prompt}]
         enc = model.tok.apply_chat_template(
             messages,
@@ -165,6 +176,10 @@ def compute_refiner_mask_plan(
             add_generation_prompt=True,
         )
         prompt_ids = enc.input_ids.to(model.device)
+        confidence = model.score_tokens(prompt_ids, comp_ids)
+    elif refiner_name == "seed-diffcoder":
+        # SeedDiffCoder._encode_prompt handles chat-template + fallback to plain tokenization.
+        prompt_ids, _ = model._encode_prompt(req.prompt)
         confidence = model.score_tokens(prompt_ids, comp_ids)
     elif refiner_name == "llada":
         messages = [{"role": "user", "content": req.prompt}]
@@ -184,6 +199,11 @@ def compute_refiner_mask_plan(
         confidence = model.score_tokens(prompt_ids, comp_ids, attention_mask)
     else:
         raise ValueError(f"Unsupported refiner for mask planning: {refiner_name}")
+
+    if protect_last_n_tokens > 0 and n_tokens > 0:
+        n = min(int(protect_last_n_tokens), n_tokens)
+        confidence = confidence.clone()
+        confidence[-n:] = 1.0
 
     mask_pos = apply_masking_policy(
         confidence,
@@ -316,12 +336,14 @@ def main() -> None:
                     help="Input JSONL file from AR model generation.")
     ap.add_argument("--out", required=True,
                     help="Output JSONL path for refined samples.")
-    ap.add_argument("--refiner", choices=["dream", "dream_general", "llada"], default=None,
+    ap.add_argument("--refiner", choices=["dream", "dream_general", "llada", "diffucoder", "seed-diffcoder"], default=None,
                     help="Refiner family. Default: infer from --model_id.")
     ap.add_argument("--model_id", default=None,
                     help="Refiner HuggingFace model ID. "
                          "Defaults to Dream-org/Dream-Coder-v0-Instruct-7B for dream, "
-                         "GSAI-ML/LLaDA-8B-Instruct for llada.")
+                         "GSAI-ML/LLaDA-8B-Instruct for llada, "
+                         "apple/DiffuCoder-7B-Instruct for diffucoder, "
+                         "ByteDance-Seed/Stable-DiffCoder-8B-Instruct for seed-diffcoder.")
     ap.add_argument("--device", default="cuda")
 
     # Locator — which model decides which tokens to remask
@@ -418,6 +440,18 @@ def main() -> None:
     ap.add_argument("--num_shards", type=int, default=1)
     ap.add_argument("--shard_idx", type=int, default=0)
 
+    ap.add_argument("--protect_imports", action="store_true",
+                    help="Force confidence=1.0 for import/from-import lines so they are never remasked.")
+    ap.add_argument(
+        "--protect_last_n_tokens",
+        type=int,
+        default=0,
+        help=(
+            "Force confidence=1.0 for the last N tokens of each completion. "
+            "LLaDA systematically assigns low confidence to final closing delimiters "
+            "(e.g. `)`, `]`) causing trailing truncation. Set to 2 or 3 to prevent this."
+        ),
+    )
     ap.add_argument("--resume", action="store_true",
                     help="Skip task_ids already present in --out (append mode).")
     args = ap.parse_args()
@@ -449,6 +483,8 @@ def main() -> None:
             "dream": "Dream-org/Dream-Coder-v0-Instruct-7B",
             "dream_general": "Dream-org/Dream-v0-Instruct-7B",
             "llada": "GSAI-ML/LLaDA-8B-Instruct",
+            "diffucoder": "apple/DiffuCoder-7B-Instruct",
+            "seed-diffcoder": "ByteDance-Seed/Stable-DiffCoder-8B-Instruct",
         }
         args.model_id = _DEFAULT_MODEL_IDS.get(refiner_name, "Dream-org/Dream-Coder-v0-Instruct-7B")
 
@@ -590,6 +626,7 @@ def main() -> None:
                         mask_granularity=args.mask_granularity,
                         span_merge_gap=args.span_merge_gap,
                         external_confidence=ext_conf,
+                        protect_last_n_tokens=args.protect_last_n_tokens,
                     )
                     mask_fraction = float(mask_stats.get("mask_fraction") or 0.0)
                     if (
@@ -624,6 +661,8 @@ def main() -> None:
                         mask_granularity=args.mask_granularity,
                         span_merge_gap=args.span_merge_gap,
                         external_confidence=ext_conf,
+                        protect_imports=args.protect_imports,
+                        protect_last_n_tokens=args.protect_last_n_tokens,
                     )
                 t1 = time.perf_counter()
             except Exception as e:
@@ -667,6 +706,7 @@ def main() -> None:
                 "span_merge_gap":       args.span_merge_gap,
                 "gate_min_mask_fraction": args.gate_min_mask_fraction,
                 "gate_max_mask_fraction": args.gate_max_mask_fraction,
+                "protect_last_n_tokens": args.protect_last_n_tokens,
                 "skip_refine":          skip_refine,
                 "skip_reason":          skip_reason,
                 "temperature":          args.temperature,

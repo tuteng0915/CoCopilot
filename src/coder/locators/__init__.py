@@ -5,6 +5,7 @@ from coder.locators.base import (
     align_confidence_to_spans,
     apply_masking_policy,
     get_token_char_spans,
+    import_line_token_mask,
 )
 from coder.locators.ar_locator import ARLocator
 from coder.locators.bert_locator import BERTLocator
@@ -20,6 +21,7 @@ __all__ = [
     "get_token_char_spans",
     "align_confidence_to_spans",
     "apply_masking_policy",
+    "import_line_token_mask",
     "build_locator",
 ]
 

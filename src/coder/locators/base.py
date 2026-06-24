@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -32,6 +33,40 @@ class TokenLocator(ABC):
                 one entry per token (same length as confidence).
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# Import-line protection
+# ---------------------------------------------------------------------------
+
+_IMPORT_RE = re.compile(r"^[ \t]*(import |from \S+ import )", re.MULTILINE)
+
+
+def import_line_token_mask(draft: str, comp_ids: "torch.Tensor", tokenizer) -> "torch.BoolTensor":
+    """
+    Return a bool tensor of shape [M] where True = token is on an import line.
+
+    Used to protect import statements from being remasked: caller sets
+    confidence[mask] = 1.0 before applying_masking_policy.
+    """
+    protected_chars: list[tuple[int, int]] = []
+    for m in _IMPORT_RE.finditer(draft):
+        line_start = m.start()
+        line_end = draft.find("\n", line_start)
+        line_end = line_end if line_end != -1 else len(draft)
+        protected_chars.append((line_start, line_end))
+
+    if not protected_chars:
+        return torch.zeros(comp_ids.shape[1], dtype=torch.bool, device=comp_ids.device)
+
+    spans = get_token_char_spans(tokenizer, draft)
+    mask = torch.zeros(len(spans), dtype=torch.bool, device=comp_ids.device)
+    for i, (ts, te) in enumerate(spans):
+        for ps, pe in protected_chars:
+            if ts < pe and te > ps:
+                mask[i] = True
+                break
+    return mask
 
 
 # ---------------------------------------------------------------------------
